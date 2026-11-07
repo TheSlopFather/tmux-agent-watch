@@ -76,6 +76,9 @@ ssh-copy-id your-remote-host
 **`no accessible tmux server sockets for remote user`.**
 The remote tmux is on a non-default socket or a different user. Check `TMUX_TMPDIR` / a custom `-S` socket, or pin it with `tmux-agent-watch link %PANE HOST SESSION SOCKET`.
 
+**A remote emoji briefly flickers off and back.**
+A single dropped or slow SSH poll used to blank a hidden-window agent's state until the next poll. The watcher now serves the last good remote result for a short grace period, so a transient probe failure no longer causes a flicker; a genuinely unreachable host still clears after the grace expires.
+
 **Old remote tmux (< 3.6).**
 Handled — the remote probe avoids raw control bytes in tmux formats, which older tmux (e.g. 3.5a) octal-escapes.
 

@@ -38,6 +38,10 @@ WINDOW_FLAG = '#{?#{==:#{@agentwatch_state},wait}, ✋,#{?#{==:#{@agentwatch_sta
 INTERVAL = 2.0
 REMOTE_INTERVAL = 8.0
 REMOTE_TIMEOUT = 12.0
+# Keep serving the last successful remote probe for this long when a probe
+# fails/times out, so a hidden-window agent's emoji does not flicker on a
+# single dropped SSH poll. A genuinely unreachable host clears after this.
+REMOTE_GRACE = 30.0
 REMOTE_LINKS = HOME / '.config/tmux-agent-watch/remotes.json'
 
 # Read-only remote inventory. The login tmux server is not necessarily the
@@ -837,10 +841,18 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
             for future in as_completed(futures):
                 key = futures[future]
                 try:
-                    result = future.result()
+                    data, error, sockets = future.result()
                 except Exception as exc:
-                    result = ([], f'remote probe error: {exc}', 0)
-                remote_cache[key] = (now, result)
+                    data, error, sockets = [], f'remote probe error: {exc}', 0
+                prev = remote_cache.get(key)
+                if not error and data is not None:
+                    remote_cache[key] = (now, data, '', sockets, now)
+                elif prev and prev[4] is not None and prev[1] and now - prev[4] <= REMOTE_GRACE:
+                    # Transient failure within grace: reuse the last good data.
+                    remote_cache[key] = (now, prev[1], error, prev[3], prev[4])
+                else:
+                    remote_cache[key] = (now, [], error, sockets,
+                                         prev[4] if prev else None)
     for key in list(remote_cache):
         if key not in targets:
             remote_cache.pop(key, None)
@@ -851,9 +863,9 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
                   f'direct_ssh={direct} local_nested_tmux={nested_count}')
         for key in keys:
             target = targets[key]
-            data, error, sockets = remote_cache.get(
-                key, (None, ([], 'not probed', 0)))[1]
-            if error:
+            _, data, error, sockets, _ = remote_cache.get(
+                key, (0, [], 'not probed', 0, None))
+            if error and not data:
                 if show:
                     print(f'  remote={target["host"]} ERROR: {error}')
                     low = error.lower()
@@ -875,10 +887,11 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
                 continue
             (rstate, rreason), counts, details = remote_states(data, remote_memory, key)
             if rstate:
-                found.append((rstate, rreason))
+                found.append((rstate, rreason + (' [stale: last probe failed]' if error else '')))
             if show:
+                stale = f' (STALE, serving last good; last probe failed: {error})' if error else ''
                 print(f'  remote={target["host"]} sockets={sockets} panes={len(data)} '
-                      f'states={counts}')
+                      f'states={counts}{stale}')
                 for detail in details:
                     print(f'    {detail["session"]}:{detail["name"]} {detail["pane"]} '
                           f'active={detail["active"]} agent={detail["agent"]} '
