@@ -35,6 +35,13 @@ CLAUDE_HOOK_MARKER = '.local/bin/tmux-agent-watch" event '
 MARK_START = '# >>> tmux-agent-watch base-only >>>'
 MARK_END = '# <<< tmux-agent-watch base-only <<<' 
 WINDOW_FLAG = '#{?#{==:#{@agentwatch_state},wait}, ✋,#{?#{==:#{@agentwatch_state},work}, 👨‍💻,#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}'
+# Flash an unfocused tab whose agent needs you (wait): turn on the blink
+# attribute for that window's status and off again at the end, so the tab
+# text flashes like tmux's activity flag. Applied only to the non-current
+# window format, so focusing the window stops the flash. Requires a terminal
+# that renders the SGR blink attribute (urxvt/xterm/iTerm2 do; kitty does not).
+BLINK_ON = '#{?#{==:#{@agentwatch_state},wait},#[blink],}'
+BLINK_OFF = '#{?#{==:#{@agentwatch_state},wait},#[noblink],}'
 INTERVAL = 2.0
 # Consecutive scans an active→idle demotion (e.g. work→ready) must persist
 # before it is applied, so a brief spinner-less gap mid-turn doesn't flicker
@@ -1285,12 +1292,12 @@ def new_config_block(ohmy):
     # In oh-my-tmux .conf.local these are interpreted as shell assignments.
     if ohmy:
         base = (
-            'tmux_conf_theme_window_status_format="${tmux_conf_theme_window_status_format}' + WINDOW_FLAG + '"\n'
+            'tmux_conf_theme_window_status_format="' + BLINK_ON + '${tmux_conf_theme_window_status_format}' + WINDOW_FLAG + BLINK_OFF + '"\n'
             'tmux_conf_theme_window_status_current_format="${tmux_conf_theme_window_status_current_format}' + WINDOW_FLAG + '"\n'
         )
     else:
         base = (
-            "set -g window-status-format '#I:#W" + WINDOW_FLAG + "'\n"
+            "set -g window-status-format '" + BLINK_ON + "#I:#W" + WINDOW_FLAG + BLINK_OFF + "'\n"
             "set -g window-status-current-format '#I:#W" + WINDOW_FLAG + "'\n"
         )
     return (MARK_START + '\n' + base +

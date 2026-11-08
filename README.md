@@ -14,6 +14,8 @@
 | 🧑‍🔧 | `ready` | Agent is idle, waiting for your next prompt |
 | ✋ | `wait` | Agent needs input — a permission/approval or choice prompt |
 
+When an agent hits ✋ `wait`, its **unfocused tab text flashes** (tmux blink attribute) so a needs-you prompt is hard to miss; the flash stops once you focus that window. Needs a terminal that renders the SGR blink attribute (urxvt/xterm/iTerm2 do; kitty does not).
+
 Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **opencode**, **aider**.
 
 ## Why
