@@ -36,6 +36,10 @@ MARK_START = '# >>> tmux-agent-watch base-only >>>'
 MARK_END = '# <<< tmux-agent-watch base-only <<<' 
 WINDOW_FLAG = '#{?#{==:#{@agentwatch_state},wait}, ✋,#{?#{==:#{@agentwatch_state},work}, 👨‍💻,#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}'
 INTERVAL = 2.0
+# Consecutive scans an active→idle demotion (e.g. work→ready) must persist
+# before it is applied, so a brief spinner-less gap mid-turn doesn't flicker
+# the emoji. Escalations apply immediately.
+DEMOTE_CONFIRM = 2
 REMOTE_INTERVAL = 8.0
 REMOTE_TIMEOUT = 12.0
 # Keep serving the last successful remote probe for this long when a probe
@@ -212,8 +216,16 @@ INTERRUPT = re.compile(r'(?i)(?:esc|enter|ctrl[\+-]c)\s+(?:to\s+)?(?:interrupt|s
 # work, that misread then masks the real state across a nested roll-up). Also
 # accept the bare token-delta timer form "(45s · ↓ 3.6k tokens)".
 CLAUDE_WORKING = re.compile(
-    r'(?m)(?:^\W{0,4}[A-Za-z][A-Za-z ]*(?:…|\.{3})\s*\(\s*\d+(?:\.\d+)?s\b'
-    r'|\(\s*\d+(?:\.\d+)?s\s*·\s*[↑↓])')
+    r'(?m)(?:'
+    # A spinner-glyph-led live footer line that is NOT a "… done …" summary and
+    # carries a verb-ellipsis or a live "(Ns" elapsed timer. Covers the whole
+    # rotating verb set and the tool-use/streaming frames.
+    r'^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✺✣✦✷✸✹✴✻✼❉❋*]'
+    r'(?![^\n]*\bdone\b)[^\n]*?(?:…|\.{3}|\(\s*\d+(?:\.\d+)?s)'
+    # Or a bare live timer carrying streaming/interrupt markers, if the spinner
+    # glyph was not captured.
+    r'|\(\s*\d+(?:\.\d+)?s\b[^)\n]*(?:[↑↓]|tokens|interrupt)'
+    r')')
 
 
 def tmux_args(socket=None):
@@ -1024,6 +1036,7 @@ def run_watch(socket):
         old = {}
         remote_cache = {}
         remote_memory = {}
+        demote_pending = {}
         hard_failures = 0
         try:
             while live:
@@ -1046,11 +1059,31 @@ def run_watch(socket):
                     time.sleep(INTERVAL)
                     continue
                 hard_failures = 0
+                # Asymmetric hysteresis: a change INTO an active state (work/
+                # wait) applies at once for responsiveness, but dropping OUT of
+                # one (e.g. work→ready during a brief spinner-less gap mid-turn)
+                # must be confirmed across a couple of scans so the emoji does
+                # not flicker. Escalations and idle↔idle changes are immediate.
+                active = ('work', 'wait')
                 for window in set(old) | set(windows):
-                    state = windows.get(window, ('',))[0]
-                    if old.get(window, '') != state:
-                        set_state(socket, window, state)
-                old = {win: pair[0] for win, pair in windows.items()}
+                    desired = windows.get(window, ('',))[0]
+                    current = old.get(window, '')
+                    if desired == current:
+                        demote_pending.pop(window, None)
+                        continue
+                    if current in active and desired not in active:
+                        cand, cnt = demote_pending.get(window, ('', 0))
+                        cnt = cnt + 1 if cand == desired else 1
+                        if cnt >= DEMOTE_CONFIRM:
+                            set_state(socket, window, desired)
+                            old[window] = desired
+                            demote_pending.pop(window, None)
+                        else:
+                            demote_pending[window] = (desired, cnt)
+                    else:
+                        set_state(socket, window, desired)
+                        old[window] = desired
+                        demote_pending.pop(window, None)
                 time.sleep(INTERVAL)
         finally:
             # Clear the indicators only on a clean, intentional stop (SIGTERM/
