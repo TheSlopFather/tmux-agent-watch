@@ -68,9 +68,11 @@ AGENTWATCH_KEY = HOME / '.ssh' / 'agentwatch'
 
 # Urgency ranking used everywhere states are combined (per-pane, per-window,
 # and when rolling up nested/remote tmux tiers). A tab inherits the MOST urgent
-# state of any agent beneath it: wait (needs a human) > ready (idle, awaiting a
-# prompt) > work (busy, leave it alone) > none.
-PRIORITY = {'': 0, 'work': 1, 'ready': 2, 'wait': 3}
+# state of any agent beneath it: wait (needs a human) > work (active, something
+# is happening) > ready (idle, awaiting a prompt) > none. Active work outranks
+# an idle sibling, so a working agent is never hidden by a ready one on the same
+# host; ready surfaces only when nothing beneath is working or waiting.
+PRIORITY = {'': 0, 'ready': 1, 'work': 2, 'wait': 3}
 
 # Read-only remote inventory. The login tmux server is not necessarily the
 # default socket: users commonly run tmux -L or -S. Search own UID's tmux
@@ -194,7 +196,14 @@ EXPLICIT = re.compile(
     r'would you like to (?:allow|approve|run|proceed)|'
     r'press (?:enter|return) to (?:confirm|accept|approve))'
 )
-DECISION_FOOTER = re.compile(r'(?i)(?:esc to cancel|tab to amend|enter to select|arrow keys|accept.{0,30}reject|allow.{0,30}deny)')
+# Footer affordances of an awaiting-input dialog. Includes codex's interactive
+# question/approval prompt, whose footer reads e.g. "tab to add notes | enter to
+# submit all | ←/→ to navigate questions | esc to interrupt" — a numbered choice
+# list the human must answer. Its only interrupt-style token is "esc to
+# interrupt" (shared with a live turn), so it is NOT listed here; the submit /
+# navigate / notes tokens are specific to a blocking prompt and let the
+# agent+numbered wait branch win before the generic INTERRUPT→work matcher.
+DECISION_FOOTER = re.compile(r'(?i)(?:esc to cancel|tab to amend|enter to select|arrow keys|accept.{0,30}reject|allow.{0,30}deny|enter to submit|navigate questions|tab to add notes)')
 NUMBERED = re.compile(r'(?m)^\s*[❯›>]?\s*[1-9][.)]\s+\S+')
 AGENT_NAMES = re.compile(r'(?i)(?:\bhermes\b|\bclaude\b|\bcodex\b|\bgemini\b|\bopencode\b|\bopen.?code\b|\baider\b|\b(?:copilot|cursor)\b)')
 AGENT_UI = re.compile(r'(?i)(?:hermes agent|hermes cli|claude code|openai codex|gemini cli|opencode|context left|bypass permissions|accept edits|shift\+tab to cycle)')
@@ -224,9 +233,8 @@ INTERRUPT = re.compile(r'(?i)(?:esc|enter|ctrl[\+-]c)\s+(?:to\s+)?(?:interrupt|s
 #   "✢ Inferring… (45s · ↓ 3.6k tokens)"
 # The verb set is huge, so match the STRUCTURE, not the word. The composer (❯)
 # stays visible while working, so this must be detected before the composer→
-# ready fallback, or a working turn reads as idle (and, since ready outranks
-# work, that misread then masks the real state across a nested roll-up). Also
-# accept the bare token-delta timer form "(45s · ↓ 3.6k tokens)".
+# ready fallback, or a live turn is misreported as an idle pane awaiting a
+# prompt. Also accept the bare token-delta timer form "(45s · ↓ 3.6k tokens)".
 CLAUDE_WORKING = re.compile(
     r'(?m)(?:'
     # An animating spinner-glyph status line (=> a turn is live), excluding the
@@ -369,7 +377,11 @@ def classify(screen, name='', command=''):
         return 'work', 'visible interrupt affordance'
     # Claude Code's working footer (spinner + verb… + live timer) stays on
     # screen alongside the composer; detect it before the composer→ready branch.
-    if agent and CLAUDE_WORKING.search(focus):
+    # Skip it for Hermes: Hermes has its own dialect matchers below and prints
+    # the same star glyphs (✦, ☤) as STATIC bullets in prose — e.g. its idle
+    # "✦ Tip: …" welcome line — which the loose spinner branch would misread as
+    # a live turn, flagging an idle Hermes as working.
+    if agent and not hermes and CLAUDE_WORKING.search(focus):
         return 'work', 'working spinner/timer footer'
     if hermes and HERMES_WORKING.search(hermes_status):
         return 'work', 'Hermes TUI activity bar'
