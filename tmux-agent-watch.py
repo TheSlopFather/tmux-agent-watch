@@ -68,9 +68,11 @@ AGENTWATCH_KEY = HOME / '.ssh' / 'agentwatch'
 
 # Urgency ranking used everywhere states are combined (per-pane, per-window,
 # and when rolling up nested/remote tmux tiers). A tab inherits the MOST urgent
-# state of any agent beneath it: wait (needs a human) > ready (idle, awaiting a
-# prompt) > work (busy, leave it alone) > none.
-PRIORITY = {'': 0, 'work': 1, 'ready': 2, 'wait': 3}
+# state of any agent beneath it: wait (needs a human) > work (active, something
+# is happening) > ready (idle, awaiting a prompt) > none. Active work outranks
+# an idle sibling, so a working agent is never hidden by a ready one on the same
+# host; ready surfaces only when nothing beneath is working or waiting.
+PRIORITY = {'': 0, 'ready': 1, 'work': 2, 'wait': 3}
 
 # Read-only remote inventory. The login tmux server is not necessarily the
 # default socket: users commonly run tmux -L or -S. Search own UID's tmux
@@ -231,9 +233,8 @@ INTERRUPT = re.compile(r'(?i)(?:esc|enter|ctrl[\+-]c)\s+(?:to\s+)?(?:interrupt|s
 #   "✢ Inferring… (45s · ↓ 3.6k tokens)"
 # The verb set is huge, so match the STRUCTURE, not the word. The composer (❯)
 # stays visible while working, so this must be detected before the composer→
-# ready fallback, or a working turn reads as idle (and, since ready outranks
-# work, that misread then masks the real state across a nested roll-up). Also
-# accept the bare token-delta timer form "(45s · ↓ 3.6k tokens)".
+# ready fallback, or a live turn is misreported as an idle pane awaiting a
+# prompt. Also accept the bare token-delta timer form "(45s · ↓ 3.6k tokens)".
 CLAUDE_WORKING = re.compile(
     r'(?m)(?:'
     # An animating spinner-glyph status line (=> a turn is live), excluding the
