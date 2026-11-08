@@ -217,14 +217,16 @@ INTERRUPT = re.compile(r'(?i)(?:esc|enter|ctrl[\+-]c)\s+(?:to\s+)?(?:interrupt|s
 # accept the bare token-delta timer form "(45s · ↓ 3.6k tokens)".
 CLAUDE_WORKING = re.compile(
     r'(?m)(?:'
-    # A spinner-glyph-led live footer line that is NOT a "… done …" summary and
-    # carries a verb-ellipsis or a live "(Ns" elapsed timer. Covers the whole
-    # rotating verb set and the tool-use/streaming frames.
-    r'^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✺✣✦✷✸✹✴✻✼❉❋*]'
-    r'(?![^\n]*\bdone\b)[^\n]*?(?:…|\.{3}|\(\s*\d+(?:\.\d+)?s)'
-    # Or a bare live timer carrying streaming/interrupt markers, if the spinner
-    # glyph was not captured.
-    r'|\(\s*\d+(?:\.\d+)?s\b[^)\n]*(?:[↑↓]|tokens|interrupt)'
+    # An animating spinner-glyph status line (=> a turn is live), excluding the
+    # frozen "· done <time>" completion summary. Covers the whole rotating verb
+    # set plus non-verb frames like "✻ Waiting for 2 background agents to
+    # finish" and tool-use spinners. (Static bullets ●/◯ are NOT spinners.)
+    r'^[ \t]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✳✶✻✽✺✣✦✷✸✹✴✼❉❋*](?![^\n]*·\s*done\b)[^\n]*\S'
+    # Or a streaming token-delta readout, with or without parens, e.g.
+    # "3m 15s · ↓ 52.4k tokens" — shown only while a turn is producing output.
+    r'|[↑↓]\s*[\d.,]+\s*[kKmM]?\s*tokens'
+    # Or a parenthesised live elapsed timer in the footer, e.g. "(8s · …".
+    r'|\(\s*\d+(?:\.\d+)?s\s*·'
     r')')
 
 
