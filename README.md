@@ -26,7 +26,7 @@ Look, I'm a shameless tmux junkie, and this is how I actually run shit: a local 
 
 ```
       ┌─────────┐   ┌─────────┐   ┌─────────┐           ┌─────────┐
-      │ host-01 │   │ host-02 │   │ host-03 │   · · ·    │ host-NN │   the fleet
+      │ host-01 │   │ host-02 │   │ host-03 │   · · ·   │ host-NN │   the fleet
       │  tmux   │   │  tmux   │   │  tmux   │           │  tmux   │   (an agent in a
       │ + agent │   │ + agent │   │ + agent │           │ + agent │    nested tmux
       └────┬────┘   └────┬────┘   └────┬────┘           └────┬────┘    on each box)
