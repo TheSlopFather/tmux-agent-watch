@@ -29,6 +29,7 @@ from datetime import datetime
 
 HOME = Path.home()
 BIN = HOME / '.local/bin/tmux-agent-watch'
+TAW_ALIAS = HOME / '.local/bin/taw'
 STATE_DIR = HOME / '.local/state/tmux-agent-watch'
 CLAUDE_SETTINGS = HOME / '.claude/settings.json'
 CLAUDE_HOOK_MARKER = '.local/bin/tmux-agent-watch" event '
@@ -810,6 +811,51 @@ def remote_probe(target):
     return records, '', sockets
 
 
+def _own_tmux_socket(path):
+    """True only for an existing tmux socket owned by this uid (defense in
+    depth before handing a client-supplied path to the inventory script)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    import stat as _stat
+    return _stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid()
+
+
+def collect_inventory(socket_arg=None):
+    """Emit the read-only pane inventory, then exit by exec'ing the POSIX
+    collector. This is the forced-command target for the restricted agentwatch
+    key: a key pinned to `tmux-agent-watch _collect` can run ONLY this and
+    nothing else on the host. It is the same protocol the probe streams over
+    stdin, so restricted and unrestricted hosts behave identically to the base.
+
+    A forced command drops the client's arguments, so recover an optional tmux
+    socket from $SSH_ORIGINAL_COMMAND (the probe sends `sh -s -- <socket>`); if
+    it is not a real socket of ours, fall back to enumerating all our sockets.
+    """
+    socket = socket_arg or ''
+    if not socket:
+        orig = os.environ.get('SSH_ORIGINAL_COMMAND', '')
+        try:
+            toks = shlex.split(orig)
+        except ValueError:
+            toks = orig.split()
+        if '--' in toks:
+            after = toks[toks.index('--') + 1:]
+            if after:
+                socket = after[0]
+    # `sh -c SCRIPT name [socket]` => $0=name, $1=socket (what REMOTE_COLLECT
+    # expects). Exec so stdout streams straight back with no Python framing.
+    args = ['sh', '-c', REMOTE_COLLECT, 'agentwatch-collect']
+    if socket and _own_tmux_socket(socket):
+        args.append(socket)
+    try:
+        os.execvp('sh', args)
+    except OSError as exc:
+        print(f'AWERROR cannot exec collector: {exc}', file=sys.stderr)
+        return 3
+
+
 def remote_target(pane, pid, links):
     """Explicit pane links override best-effort automatic SSH discovery."""
     pinned = links.get(pane)
@@ -1377,6 +1423,155 @@ def update_config(path, ohmy, uninstall=False):
     return True
 
 
+# Remote bootstrap run by `taw push` over a SINGLE ssh session (one password
+# prompt, if any). It carries the watcher source inline as base64 so the remote
+# needs nothing but python3, tmux and base64 — no GitHub, no scp round-trip. It
+# installs the watcher, then authorizes the probe key as a RESTRICTED, read-only
+# forced command: the key can run only `tmux-agent-watch _collect` and nothing
+# else (no shell, no PTY, no forwarding). Any prior line for this key is removed
+# first, so re-pushing upgrades a full-shell grant in place.
+PUSH_BOOTSTRAP = r'''set -eu
+umask 077
+mkdir -p "$HOME/.local/bin" "$HOME/.ssh"
+chmod 700 "$HOME/.ssh" 2>/dev/null || true
+command -v python3 >/dev/null 2>&1 || { echo 'AWPUSH python3 not found on remote PATH' >&2; exit 1; }
+command -v base64  >/dev/null 2>&1 || { echo 'AWPUSH base64 not found on remote PATH' >&2; exit 1; }
+TAW="$HOME/.local/bin/tmux-agent-watch"
+tmp="$(mktemp "${TMPDIR:-/tmp}/taw.XXXXXX")" || { echo 'AWPUSH mktemp failed' >&2; exit 1; }
+base64 -d > "$tmp" <<'AWB64'
+__B64__
+AWB64
+python3 "$tmp"; rc=$?
+rm -f "$tmp"
+[ "$rc" -eq 0 ] || { echo 'AWPUSH remote install failed' >&2; exit "$rc"; }
+AK="$HOME/.ssh/authorized_keys"
+[ -f "$AK" ] || : > "$AK"
+ENTRY="restrict,command=\"exec $TAW _collect\" __PUBLINE__"
+new="$(mktemp "${TMPDIR:-/tmp}/ak.XXXXXX")" || { echo 'AWPUSH mktemp failed' >&2; exit 1; }
+grep -F -v '__KEYBODY__' "$AK" > "$new" 2>/dev/null || true
+printf '%s\n' "$ENTRY" >> "$new"
+cat "$new" > "$AK"
+rm -f "$new"
+chmod 600 "$AK"
+echo 'AWPUSH ok'
+'''
+
+
+def local_hostname():
+    try:
+        return os.uname().nodename or 'host'
+    except (OSError, AttributeError):
+        return 'host'
+
+
+def ensure_agentwatch_key():
+    """Make sure the dedicated probe key exists, creating it on an explicit yes.
+    Returns True if a usable key (private + public) is present afterwards."""
+    pub = AGENTWATCH_KEY.with_suffix('.pub')
+    if AGENTWATCH_KEY.is_file() and pub.is_file():
+        return True
+    if shutil.which('ssh-keygen') is None:
+        print('ssh-keygen not found; cannot create a probe key.', file=sys.stderr)
+        return False
+    print(f'No dedicated probe key at {AGENTWATCH_KEY}.')
+    print('It is a passphrase-less ed25519 key used ONLY for read-only agent probes;')
+    print('`taw push` authorizes it on each remote as a restricted, read-only command.')
+    try:
+        resp = input('Create it now? [Y/n] ').strip().lower()
+    except EOFError:
+        resp = 'n'
+    if resp not in ('', 'y', 'yes'):
+        print('A probe key is required to push a tier. Aborting.', file=sys.stderr)
+        return False
+    AGENTWATCH_KEY.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(AGENTWATCH_KEY.parent, 0o700)
+    except OSError:
+        pass
+    r = subprocess.run(['ssh-keygen', '-t', 'ed25519', '-N', '', '-f', str(AGENTWATCH_KEY),
+                        '-C', f'agentwatch@{local_hostname()}'],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print('ssh-keygen failed: ' + (r.stderr.strip() or 'unknown error'), file=sys.stderr)
+        return False
+    print(f'Created {AGENTWATCH_KEY}.')
+    return AGENTWATCH_KEY.is_file() and pub.is_file()
+
+
+def ensure_alias():
+    """Create/refresh the short `taw` alias as a symlink to the installed tool.
+    Leaves a pre-existing real file (not our symlink) untouched."""
+    try:
+        if TAW_ALIAS.is_symlink():
+            if os.readlink(TAW_ALIAS) == BIN.name:
+                return True
+            TAW_ALIAS.unlink()
+        elif TAW_ALIAS.exists():
+            return False  # a real file we didn't create; don't clobber it
+        TAW_ALIAS.symlink_to(BIN.name)  # relative: resolves beside the tool
+        return True
+    except OSError:
+        return False
+
+
+def remove_alias():
+    try:
+        if TAW_ALIAS.is_symlink() and os.readlink(TAW_ALIAS) == BIN.name:
+            TAW_ALIAS.unlink()
+    except OSError:
+        pass
+
+
+def push_tier(host, ssh_opts):
+    """Install the watcher on a remote and authorize this box's restricted probe
+    key there, in one SSH session. Makes the remote a watched tier."""
+    if not re.fullmatch(r'[\w.\-:@\[\]]+', host or ''):
+        print('Usage: taw push [user@]host [-- ssh-options…]', file=sys.stderr)
+        return 2
+    if not ensure_agentwatch_key():
+        return 1
+    pub = AGENTWATCH_KEY.with_suffix('.pub')
+    try:
+        publine = pub.read_text(encoding='utf-8').strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        print(f'Cannot read public key {pub}.', file=sys.stderr)
+        return 1
+    parts = publine.split()
+    if len(parts) < 2 or '"' in publine or '\n' in publine:
+        print('Unexpected public key format; refusing to authorize.', file=sys.stderr)
+        return 1
+    keybody = parts[1]
+    source = Path(__file__).resolve()
+    try:
+        import base64
+        raw = base64.b64encode(source.read_bytes()).decode('ascii')
+    except OSError as exc:
+        print(f'Cannot read {source}: {exc}', file=sys.stderr)
+        return 1
+    b64 = '\n'.join(raw[i:i + 76] for i in range(0, len(raw), 76))
+    bootstrap = (PUSH_BOOTSTRAP.replace('__B64__', b64)
+                 .replace('__PUBLINE__', publine).replace('__KEYBODY__', keybody))
+    ssh_opts = list(ssh_opts or [])
+    print(f'Pushing tmux-agent-watch to {host} (a password prompt may follow)…')
+    try:
+        proc = subprocess.run(['ssh', '-T'] + ssh_opts + [host, 'sh'], input=bootstrap, text=True)
+    except FileNotFoundError:
+        print('ssh executable not found.', file=sys.stderr)
+        return 1
+    if proc.returncode != 0:
+        print(f'Push failed (ssh exit {proc.returncode}).', file=sys.stderr)
+        return 1
+    print('Verifying the restricted probe key (non-interactive)…')
+    rows, err, socks = remote_probe({'host': host, 'opts': ssh_opts})
+    if err:
+        print(f'  Probe did not return inventory yet: {err}')
+        print('  If the remote has no tmux running yet, that is expected; re-check with `taw check`.')
+        return 0
+    print(f'  OK — scoped key returned {len(rows)} pane(s) across {socks} socket(s).')
+    print(f'{host} is now a watched tier; its agent states will roll up here.')
+    return 0
+
+
 def install(uninstall=False):
     if os.geteuid() == 0 and HOME == Path('/root'):
         print('Run as your normal user, not root/sudo.', file=sys.stderr)
@@ -1392,9 +1587,12 @@ def install(uninstall=False):
         if source != BIN:
             shutil.copy2(source, BIN)
         BIN.chmod(0o755)
+        aliased = ensure_alias()
         update_config(cfg, ohmy, False)
         updated_hooks = update_claude_hooks(False)
         print(f'Installed on this machine only: {BIN}')
+        print(f'Short command: {TAW_ALIAS} -> tmux-agent-watch' if aliased
+              else f'Short command `taw` not linked ({TAW_ALIAS} already exists); use the full name.')
         print(f'tmux config: {cfg} ({"oh-my-tmux" if ohmy else "standard tmux"})')
         if sock:
             # Sourcing the main config applies the oh-my-tmux theme variables.
@@ -1407,9 +1605,10 @@ def install(uninstall=False):
         print('Indicators: ✋ input needed; 👨‍💻 working; 🧑‍🔧 ready/idle.')
         print('Local Claude Code: native hooks installed; restart Claude to load them.' if updated_hooks else 'Local Claude Code: native hook configuration unchanged or unavailable.')
         print('Remote nested tmux: inspects hidden windows, with per-pane agent process identification.')
-        print(f'Diagnostics: {BIN} check')
+        print(f'Diagnostics: taw check  ·  Push a remote tier: taw push user@host')
         print(f'Uninstall: python3 {source} --uninstall')
     else:
+        remove_alias()
         stop_watch(sock)
         reset_native(sock)
         update_config(cfg, ohmy, True)
@@ -1429,11 +1628,17 @@ def install(uninstall=False):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('command', nargs='?', default='install',
-                    choices=['install', 'start', 'stop', 'check', 'event', 'reset', 'link', 'unlink', 'links', '_watch'])
+                    choices=['install', 'start', 'stop', 'check', 'event', 'reset', 'link', 'unlink', 'links', 'push', '_watch', '_collect'])
     ap.add_argument('socket', nargs='?')
     ap.add_argument('extra', nargs='*')
     ap.add_argument('--uninstall', action='store_true')
     args = ap.parse_args()
+    if args.command == '_collect':
+        return collect_inventory(args.socket)
+    if args.command == 'push':
+        if not args.socket:
+            ap.error('usage: taw push [user@]host [-- ssh-options…]')
+        return push_tier(args.socket, args.extra)
     if args.command == 'link':
         # Usage: tmux-agent-watch link %5 gpu-server [tmux-session] [socket-path]
         if not args.socket or not args.extra:
