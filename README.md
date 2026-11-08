@@ -33,6 +33,14 @@ A single lightweight Python watcher runs per tmux server on your **base host onl
 
 Detected state is stored as a tmux window option (`@agentwatch_state`) and rendered in `window-status-format`. Works with both standard tmux and [oh-my-tmux](https://github.com/gpakosz/.tmux).
 
+### Most-urgent roll-up
+
+A tab that contains several agents (multiple panes, or an SSH session into a remote with many agent windows) shows the **most urgent** state beneath it: **✋ `wait` > 🧑‍🔧 `ready` > 👨‍💻 `work`**. So a box where one agent needs you and three are busy shows ✋ — you never miss the one that's waiting.
+
+### Deep nesting (jump boxes)
+
+The watcher's read-only probe reaches **one SSH hop**. If you chain through a jump box (`local → jump → fleet`), a probe can't type the interactive password your jump box asked for, so run `tmux-agent-watch` **on the jump box too**. Each tier watches the hop below it and publishes state into its own tmux; walking up the chain, every tier rolls up the most-urgent agent beneath it.
+
 ## Requirements
 
 - Python 3, `tmux`, and `ssh` on the base host (nothing required on remote hosts).

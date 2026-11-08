@@ -44,6 +44,12 @@ REMOTE_TIMEOUT = 12.0
 REMOTE_GRACE = 30.0
 REMOTE_LINKS = HOME / '.config/tmux-agent-watch/remotes.json'
 
+# Urgency ranking used everywhere states are combined (per-pane, per-window,
+# and when rolling up nested/remote tmux tiers). A tab inherits the MOST urgent
+# state of any agent beneath it: wait (needs a human) > ready (idle, awaiting a
+# prompt) > work (busy, leave it alone) > none.
+PRIORITY = {'': 0, 'work': 1, 'ready': 2, 'wait': 3}
+
 # Read-only remote inventory. The login tmux server is not necessarily the
 # default socket: users commonly run tmux -L or -S. Search own UID's tmux
 # sockets and report an explicit error if none can be inspected.
@@ -624,6 +630,34 @@ def ssh_agent_for_pid(pid):
     return None
 
 
+def _is_live_socket(path):
+    try:
+        return bool(path) and Path(path).is_socket()
+    except OSError:
+        return False
+
+
+def discover_live_agent_socket(preferred=None):
+    """Find a usable ssh-agent socket for a non-interactive probe.
+
+    Prefers an explicit path, then the current environment, then well-known
+    runtime locations (gnome-keyring/gcr, systemd, forwarded agents). Returns
+    None if nothing live is found, letting ssh fall back to on-disk keys.
+    """
+    runtime = os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
+    candidates = [preferred, os.environ.get('SSH_AUTH_SOCK'),
+                  f'{runtime}/gcr/ssh', f'{runtime}/keyring/ssh',
+                  f'{runtime}/ssh-agent.socket']
+    try:
+        candidates += sorted(str(p) for p in Path('/tmp').glob('ssh-*/agent.*'))
+    except OSError:
+        pass
+    for cand in candidates:
+        if _is_live_socket(cand):
+            return cand
+    return None
+
+
 def discovered_ssh_targets(pid):
     """Detect all SSH subprocesses under one pane (not just the first)."""
     matches = []
@@ -674,8 +708,17 @@ def remote_probe(target):
     cmd = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectionAttempts=1',
            '-o', 'ConnectTimeout=4', '-o', 'NumberOfPasswordPrompts=0'] + opts + [host, remote_shell]
     ssh_env = os.environ.copy()
-    if target.get('ssh_auth_sock'):
-        ssh_env['SSH_AUTH_SOCK'] = target['ssh_auth_sock']
+    # Use the interactive pane's agent socket when it is still live; otherwise
+    # find any usable agent rather than handing ssh a stale socket (which makes
+    # BatchMode auth flap and the emoji flicker). If none is live, drop the var
+    # so ssh can fall back to on-disk IdentityFiles.
+    agent = target.get('ssh_auth_sock')
+    if not _is_live_socket(agent):
+        agent = discover_live_agent_socket(ssh_env.get('SSH_AUTH_SOCK'))
+    if agent:
+        ssh_env['SSH_AUTH_SOCK'] = agent
+    else:
+        ssh_env.pop('SSH_AUTH_SOCK', None)
     try:
         proc = subprocess.run(cmd, input=REMOTE_COLLECT, capture_output=True, text=True, encoding='utf-8',
                               errors='replace', timeout=REMOTE_TIMEOUT, env=ssh_env)
@@ -716,7 +759,6 @@ def remote_states(records, memory=None, target_key=None):
     state is reasonable only while its captured screen has not changed.
     Whenever fresh UI cues appear, they override the remembered state.
     """
-    priority = {'': 0, 'ready': 1, 'work': 2, 'wait': 3}
     best = ('', 'no recognizable agent state in remote windows')
     counts = {'ready': 0, 'work': 0, 'wait': 0}
     details = []
@@ -737,7 +779,7 @@ def remote_states(records, memory=None, target_key=None):
                 memory.pop(key, None)
         if state:
             counts[state] += 1
-        if priority[state] > priority[best[0]]:
+        if PRIORITY[state] > PRIORITY[best[0]]:
             best = (state, f'remote {sess}:{name} {pane}: {reason}')
         details.append({'pane':pane, 'session':sess, 'name':name,
                         'active':active, 'agent':proc_agent or '-',
@@ -761,7 +803,6 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
     links = saved_remote_links()
     pids = pane_process_ids(socket)
     windows = {}
-    priority = {'': 0, 'ready': 1, 'work': 2, 'wait': 3}
     pane_info = []
     targets = {}
 
@@ -771,10 +812,17 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
     nested_index = local_nested_index(socket)
 
     def add_target(target):
+        # The agent socket is deliberately NOT part of the identity: it can flap
+        # (a path one tick, None the next) as /proc readability changes, and
+        # including it would churn the remote_cache key and lose the grace window
+        # that holds a hidden-window emoji steady across a dropped poll.
         key = (target['host'], tuple(target.get('opts', [])),
-               target.get('session'), target.get('socket'),
-               target.get('ssh_auth_sock'))
-        targets[key] = target
+               target.get('session'), target.get('socket'))
+        existing = targets.get(key)
+        if existing is None:
+            targets[key] = target
+        elif target.get('ssh_auth_sock') and not existing.get('ssh_auth_sock'):
+            existing['ssh_auth_sock'] = target['ssh_auth_sock']
         return key
 
     for pane, window, name, command in panes:
@@ -904,8 +952,8 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
             print('  remote=not discovered. If this pane contains SSH in an '
                   'unreachable nested tmux, use: tmux-agent-watch link '
                   f'{pane} HOST')
-        state, reason = max(found, key=lambda p: priority.get(p[0], 0)) if found else ('', 'no state')
-        if window not in windows or priority[state] > priority[windows[window][0]]:
+        state, reason = max(found, key=lambda p: PRIORITY.get(p[0], 0)) if found else ('', 'no state')
+        if window not in windows or PRIORITY[state] > PRIORITY[windows[window][0]]:
             windows[window] = (state, reason)
         if show:
             print(f'  => {pane}: {state or "unknown"} [{reason}]')
@@ -934,25 +982,41 @@ def run_watch(socket):
         old = {}
         remote_cache = {}
         remote_memory = {}
-        failures = 0
+        hard_failures = 0
         try:
             while live:
-                windows = scan(socket, remote_cache=remote_cache, remote_memory=remote_memory)
+                try:
+                    windows = scan(socket, remote_cache=remote_cache,
+                                   remote_memory=remote_memory)
+                except Exception:
+                    # A transient error (tmux hiccup, an SSH teardown mid-probe,
+                    # a parse race) must NEVER kill the daemon: dying would run
+                    # the cleanup below and blank the whole status bar until the
+                    # next tmux reload. Keep the last states and retry next tick.
+                    time.sleep(INTERVAL)
+                    continue
                 if windows is None:
-                    failures += 1
-                    if failures >= 3:
+                    # list-panes failed: the outer tmux server is likely gone.
+                    hard_failures += 1
+                    if hard_failures >= 5:
                         break
-                else:
-                    failures = 0
-                    for window in set(old) | set(windows):
-                        state = windows.get(window, ('',))[0]
-                        if old.get(window, '') != state:
-                            set_state(socket, window, state)
-                    old = {win: pair[0] for win, pair in windows.items()}
+                    time.sleep(INTERVAL)
+                    continue
+                hard_failures = 0
+                for window in set(old) | set(windows):
+                    state = windows.get(window, ('',))[0]
+                    if old.get(window, '') != state:
+                        set_state(socket, window, state)
+                old = {win: pair[0] for win, pair in windows.items()}
                 time.sleep(INTERVAL)
         finally:
-            for window in old:
-                set_state(socket, window, '')
+            # Clear the indicators only on a clean, intentional stop (SIGTERM/
+            # SIGINT from `stop`/uninstall set live=False). On a crash or a lost
+            # tmux server, leave the last states in place so the bar does not
+            # silently blank; a relaunched daemon re-sets them from fresh scans.
+            if not live:
+                for window in old:
+                    set_state(socket, window, '')
             try:
                 if path.read_text().strip() == str(os.getpid()):
                     path.unlink()
