@@ -35,13 +35,18 @@ CLAUDE_HOOK_MARKER = '.local/bin/tmux-agent-watch" event '
 MARK_START = '# >>> tmux-agent-watch base-only >>>'
 MARK_END = '# <<< tmux-agent-watch base-only <<<' 
 WINDOW_FLAG = '#{?#{==:#{@agentwatch_state},wait}, ✋,#{?#{==:#{@agentwatch_state},work}, 👨‍💻,#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}'
-# Flash an unfocused tab whose agent needs you (wait): turn on the blink
-# attribute for that window's status and off again at the end, so the tab
-# text flashes like tmux's activity flag. Applied only to the non-current
-# window format, so focusing the window stops the flash. Requires a terminal
-# that renders the SGR blink attribute (urxvt/xterm/iTerm2 do; kitty does not).
-BLINK_ON = '#{?#{==:#{@agentwatch_state},wait},#[blink],}'
-BLINK_OFF = '#{?#{==:#{@agentwatch_state},wait},#[noblink],}'
+# Flash an unfocused tab whose agent needs you (wait). Rather than the SGR
+# blink attribute — which terminals drive off their own timer (urxvt resets it
+# on every keypress/mouse move, so the flash stops exactly when you're busy
+# elsewhere, and kitty ignores it entirely) — the watcher drives the flash
+# itself: it toggles the global @agentwatch_blink option a few times a second
+# while any window waits and forces a status redraw. The format inverts the
+# tab (reverse video) on the "on" phase, giving a reliable flash on any
+# terminal. Applied only to the non-current window format, so focusing the
+# window stops the flash.
+FLASH_ON = '#{?#{==:#{@agentwatch_state},wait},#{?#{==:#{@agentwatch_blink},on},#[reverse],},}'
+FLASH_OFF = '#{?#{==:#{@agentwatch_state},wait},#[noreverse],}'
+BLINK_PERIOD = 0.5
 INTERVAL = 2.0
 # Consecutive scans an active→idle demotion (e.g. work→ready) must persist
 # before it is applied, so a brief spinner-less gap mid-turn doesn't flicker
@@ -295,6 +300,12 @@ def set_state(socket, window, state):
         tmux_call(socket, 'set-option', '-w', '-t', window, '@agentwatch_state', state)
     else:
         tmux_call(socket, 'set-option', '-wu', '-t', window, '@agentwatch_state')
+
+
+def set_blink(socket, on):
+    """Drive the wait-flash: toggle the global phase and force a status redraw."""
+    tmux_call(socket, 'set-option', '-g', '@agentwatch_blink', 'on' if on else 'off')
+    tmux_call(socket, 'refresh-client', '-S')
 
 
 def list_panes(socket):
@@ -1047,6 +1058,7 @@ def run_watch(socket):
         remote_memory = {}
         demote_pending = {}
         hard_failures = 0
+        blink_phase = False
         try:
             while live:
                 try:
@@ -1095,7 +1107,22 @@ def run_watch(socket):
                         set_state(socket, window, desired)
                         old[window] = desired
                         demote_pending.pop(window, None)
-                time.sleep(INTERVAL)
+                # While any window is waiting on the user, flash it: toggle the
+                # reverse-video phase every BLINK_PERIOD across the inter-scan
+                # gap. Otherwise just sleep, leaving the phase off.
+                if any(s == 'wait' for s in old.values()):
+                    deadline = time.monotonic() + INTERVAL
+                    while live:
+                        blink_phase = not blink_phase
+                        set_blink(socket, blink_phase)
+                        if time.monotonic() >= deadline:
+                            break
+                        time.sleep(BLINK_PERIOD)
+                else:
+                    if blink_phase:
+                        blink_phase = False
+                        set_blink(socket, False)
+                    time.sleep(INTERVAL)
         finally:
             # Clear the indicators only on a clean, intentional stop (SIGTERM/
             # SIGINT from `stop`/uninstall set live=False). On a crash or a lost
@@ -1104,6 +1131,7 @@ def run_watch(socket):
             if not live:
                 for window in old:
                     set_state(socket, window, '')
+                tmux_call(socket, 'set-option', '-gu', '@agentwatch_blink')
             try:
                 if path.read_text().strip() == str(os.getpid()):
                     path.unlink()
@@ -1292,12 +1320,12 @@ def new_config_block(ohmy):
     # In oh-my-tmux .conf.local these are interpreted as shell assignments.
     if ohmy:
         base = (
-            'tmux_conf_theme_window_status_format="' + BLINK_ON + '${tmux_conf_theme_window_status_format}' + WINDOW_FLAG + BLINK_OFF + '"\n'
+            'tmux_conf_theme_window_status_format="' + FLASH_ON + '${tmux_conf_theme_window_status_format}' + WINDOW_FLAG + FLASH_OFF + '"\n'
             'tmux_conf_theme_window_status_current_format="${tmux_conf_theme_window_status_current_format}' + WINDOW_FLAG + '"\n'
         )
     else:
         base = (
-            "set -g window-status-format '" + BLINK_ON + "#I:#W" + WINDOW_FLAG + BLINK_OFF + "'\n"
+            "set -g window-status-format '" + FLASH_ON + "#I:#W" + WINDOW_FLAG + FLASH_OFF + "'\n"
             "set -g window-status-current-format '#I:#W" + WINDOW_FLAG + "'\n"
         )
     return (MARK_START + '\n' + base +
