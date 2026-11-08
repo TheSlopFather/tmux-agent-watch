@@ -51,6 +51,18 @@ ssh-copy-id -i ~/.ssh/agentwatch.pub user@next-hop
 
 No `ssh_config` entry needed — drop that key on each tier and probes just work.
 
+### Propagation speed across tiers
+
+Remote state is **polled**, not pushed. Each tier re-probes the hop below it every `REMOTE_INTERVAL` (default **8s**), so a state that crosses two hops can lag ~8s per hop — and a burst shorter than the interval (e.g. a 2-second command) can finish *between* probes and never be sampled up the chain. Long-lived states like `wait` (which blocks on you) always propagate; brief `work` bursts may not. Directly-attached panes don't have this lag — they're classified locally every 2s.
+
+To make an outer tier (e.g. a jump box) more responsive, lower its probe interval — live-tunable, no restart:
+
+```bash
+tmux set -g @agentwatch_remote_interval 3   # seconds; applies to this tier's watcher
+```
+
+Run the hop-heavy tiers hot and leave the fleet-facing tiers at the default to avoid a storm of SSH probes.
+
 ## Requirements
 
 - Python 3, `tmux`, and `ssh` on the base host (nothing required on remote hosts).

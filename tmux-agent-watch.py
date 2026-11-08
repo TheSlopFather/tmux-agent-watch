@@ -800,10 +800,12 @@ def remote_states(records, memory=None, target_key=None):
     return best, counts, details
 
 
-def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memory=None):
+def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memory=None,
+         remote_interval=None):
     panes = list_panes(socket)
     if panes is None:
         return None
+    ri = remote_interval if (remote_interval and remote_interval >= 1.0) else REMOTE_INTERVAL
     if remote_cache is None:
         remote_cache = {}
     if remote_memory is None:
@@ -891,7 +893,7 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
     # stall other panes. All remote tmux windows are captured independently
     # of which window the interactive remote client has selected.
     due = {key: target for key, target in targets.items()
-           if force_remote or key not in remote_cache or now - remote_cache[key][0] >= REMOTE_INTERVAL}
+           if force_remote or key not in remote_cache or now - remote_cache[key][0] >= ri}
     if due:
         with ThreadPoolExecutor(max_workers=min(8, len(due))) as pool:
             futures = {pool.submit(remote_probe, target): key for key, target in due.items()}
@@ -969,6 +971,22 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
     return windows
 
 
+def remote_interval_for(socket):
+    """Per-tier override of the remote-probe cadence, live-tunable with:
+        tmux set -g @agentwatch_remote_interval <seconds>
+    Lower it on outer tiers (e.g. a jump box) so short-lived states propagate
+    up faster, at the cost of more frequent SSH probes. Falls back to the
+    REMOTE_INTERVAL default when unset or invalid."""
+    out = tmux_call(socket, 'show-option', '-gv', '@agentwatch_remote_interval')
+    try:
+        val = float(out.stdout.strip())
+        if val >= 1.0:
+            return val
+    except (ValueError, AttributeError):
+        pass
+    return REMOTE_INTERVAL
+
+
 def run_watch(socket):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = state_file(socket)
@@ -996,7 +1014,8 @@ def run_watch(socket):
             while live:
                 try:
                     windows = scan(socket, remote_cache=remote_cache,
-                                   remote_memory=remote_memory)
+                                   remote_memory=remote_memory,
+                                   remote_interval=remote_interval_for(socket))
                 except Exception:
                     # A transient error (tmux hiccup, an SSH teardown mid-probe,
                     # a parse race) must NEVER kill the daemon: dying would run
