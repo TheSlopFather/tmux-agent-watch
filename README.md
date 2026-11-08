@@ -14,7 +14,7 @@
 | 🧑‍🔧 | `ready` | Agent is idle, waiting for your next prompt |
 | ✋ | `wait` | Agent needs input — a permission/approval or choice prompt |
 
-When an agent hits ✋ `wait`, its **unfocused tab flashes** (the watcher toggles reverse-video a couple times a second) so a needs-you prompt is hard to miss; the flash stops once you focus that window. The watcher drives the flash itself rather than relying on the terminal's SGR blink attribute, so it works on any terminal and doesn't pause when you type or move the mouse.
+When an agent hits ✋ `wait`, its **unfocused tab flashes**.
 
 Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **opencode**, **aider**.
 
