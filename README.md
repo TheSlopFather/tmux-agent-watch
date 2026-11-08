@@ -22,7 +22,32 @@ Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **open
 
 When you run several agents across tmux windows — and some of those windows are SSH sessions into *nested* tmux on remote boxes — there's no easy way to see who needs attention without cycling through every window. `tmux-agent-watch` watches them all from one place and surfaces the state in the status bar.
 
-Look, I'm a shameless tmux junkie — panes nested in windows nested in sessions nested in *more* goddamn tmux over SSH. That's not me being a masochist, that's how I wrangle a shitload of systems at scale without losing my mind. I tried `herdr` first and it just couldn't hang with that kind of nesting, so I said fuck it and vibe coded this slop myself. It works across my whole fleet, which is the only benchmark I give a shit about. Your mileage may vary.
+Look, I'm a shameless tmux junkie, and this is how I actually run shit: a local tmux on my box, SSH'd up into a jump box running its own tmux, fanned out across a whole fleet of machines — each one running, you guessed it, *more* goddamn tmux with an agent nested inside. Tiers on tiers on tiers. That's not masochism, that's how I babysit a shitload of agents at scale without losing my mind. I tried `herdr` first and it folded the second I nested that deep, so I said fuck it and vibe coded this slop myself. It works across my whole stack, which is the only benchmark I give a shit about. Your mileage may vary.
+
+```
+      ┌─────────┐   ┌─────────┐   ┌─────────┐           ┌─────────┐
+      │ host-01 │   │ host-02 │   │ host-03 │   · · ·    │ host-NN │   the fleet
+      │  tmux   │   │  tmux   │   │  tmux   │           │  tmux   │   (an agent in a
+      │ + agent │   │ + agent │   │ + agent │           │ + agent │    nested tmux
+      └────┬────┘   └────┬────┘   └────┬────┘           └────┬────┘    on each box)
+           │             │             │                     │
+           └─────────────┴──────┬──────┴─────────────────────┘
+                                │   ssh  (fan-out to the fleet)
+                          ┌─────┴─────┐
+                          │ Jump box  │   bastion: tmux + watcher,
+                          │   tmux    │   probes every fleet host
+                          │ + watcher │
+                          └─────┬─────┘
+                                │   ssh
+                          ┌─────┴─────┐
+                          │ Local box │   you are here: outer tmux + watcher;
+                          │   tmux    │   the whole fleet's state lands on
+                          │ + watcher │   this one status bar
+                          └───────────┘
+
+   state rolls DOWN each hop — every tab inherits the most-urgent agent
+   above it:   ✋ wait  >  🧑‍🔧 ready  >  👨‍💻 work
+```
 
 ## How it works
 
