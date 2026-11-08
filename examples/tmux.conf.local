@@ -1,0 +1,84 @@
+# oh-my-tmux local overrides — example from TheSlopFather's rig
+# Drop this in as your ~/.tmux.conf.local (or ~/.config/tmux/tmux.conf.local
+# if you use the XDG layout). This is the *only* file you should edit —
+# never touch the symlinked .tmux.conf that oh-my-tmux ships.
+#
+# https://github.com/gpakosz/.tmux
+
+
+# -- display -------------------------------------------------------------------
+
+# terminal title: host ❐ session ● index window
+tmux_conf_theme_terminal_title='#h ❐ #S ● #I #W'
+
+# window status: just index + name, no circled-index cruft
+tmux_conf_theme_window_status_format='#I #W'
+tmux_conf_theme_window_status_current_format='#I #W'
+
+# status left/right content
+tmux_conf_theme_status_left=' ❐ #S | '
+tmux_conf_theme_status_right='#{prefix}#{pairing}#{synchronized} #{?battery_status, #{battery_status},}#{?battery_percentage, #{battery_percentage},} | #{username}#{root}@#{hostname} '
+
+
+# -- clipboard -----------------------------------------------------------------
+
+# copy selection to the OS clipboard (needs xsel/xclip on Linux)
+tmux_conf_copy_to_os_clipboard=false
+
+
+# -- user customizations -------------------------------------------------------
+
+# Prefix: replace C-b with C-a on the LOCAL workstation.
+# On a jump box use C-q, and leave fleet machines on the stock C-b — that way a
+# single keystroke always lands on the tier you're looking at instead of being
+# swallowed by an outer tmux. See the "Prefix keys per tier" table in the README.
+set -gu prefix2
+unbind C-a
+unbind C-b
+set -g prefix C-a
+bind C-a send-prefix
+
+###############
+# My Settings #
+###############
+
+# Default shell
+set-option -g default-shell /bin/zsh
+
+# Press the prefix twice to jump to the last window
+bind-key C-a last-window
+
+# Deep scrollback — you babysit a lot of agents, keep the logs
+set -g history-limit 1000000
+
+# Start window numbering at 0
+set -g base-index 0
+
+# Don't let programs rename windows out from under you
+set -g allow-rename off
+set-option -g allow-rename off
+
+# vi-style search in copy mode (press / to search)
+set-window-option -g mode-keys vi
+
+# No delay on the escape key
+set -s escape-time 0
+
+# New windows open with an empty name (you name them yourself)
+bind-key c new-window -n ''
+
+# Pane wrangling: send/join/break panes between windows
+bind-key j command-prompt -p "send pane to:"   "join-pane -t '%%'"
+bind-key l command-prompt -p "join pane from:" "join-pane -s '%%'"
+bind-key k break-pane \; rename-window ''
+
+# Mouse on, with sane wheel-scroll into copy mode
+set -g mouse on
+bind -n WheelUpPane if-shell -F -t = "#{mouse_any_flag}" "send-keys -M" "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'select-pane -t=; copy-mode -e; send-keys -M'"
+bind -n WheelDownPane select-pane -t= \; send-keys -M
+bind -n C-WheelUpPane select-pane -t= \; copy-mode -e \; send-keys -M
+
+# NOTE: tmux-agent-watch adds its own block below this line automatically when
+# you run the installer — you do not write it by hand. It overrides the two
+# window-status-format variables to append the agent-state emoji (and the
+# wait-flash) and starts the watcher. Running --uninstall removes it cleanly.
