@@ -194,7 +194,14 @@ EXPLICIT = re.compile(
     r'would you like to (?:allow|approve|run|proceed)|'
     r'press (?:enter|return) to (?:confirm|accept|approve))'
 )
-DECISION_FOOTER = re.compile(r'(?i)(?:esc to cancel|tab to amend|enter to select|arrow keys|accept.{0,30}reject|allow.{0,30}deny)')
+# Footer affordances of an awaiting-input dialog. Includes codex's interactive
+# question/approval prompt, whose footer reads e.g. "tab to add notes | enter to
+# submit all | ←/→ to navigate questions | esc to interrupt" — a numbered choice
+# list the human must answer. Its only interrupt-style token is "esc to
+# interrupt" (shared with a live turn), so it is NOT listed here; the submit /
+# navigate / notes tokens are specific to a blocking prompt and let the
+# agent+numbered wait branch win before the generic INTERRUPT→work matcher.
+DECISION_FOOTER = re.compile(r'(?i)(?:esc to cancel|tab to amend|enter to select|arrow keys|accept.{0,30}reject|allow.{0,30}deny|enter to submit|navigate questions|tab to add notes)')
 NUMBERED = re.compile(r'(?m)^\s*[❯›>]?\s*[1-9][.)]\s+\S+')
 AGENT_NAMES = re.compile(r'(?i)(?:\bhermes\b|\bclaude\b|\bcodex\b|\bgemini\b|\bopencode\b|\bopen.?code\b|\baider\b|\b(?:copilot|cursor)\b)')
 AGENT_UI = re.compile(r'(?i)(?:hermes agent|hermes cli|claude code|openai codex|gemini cli|opencode|context left|bypass permissions|accept edits|shift\+tab to cycle)')
