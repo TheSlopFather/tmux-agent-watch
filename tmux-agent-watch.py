@@ -43,6 +43,12 @@ REMOTE_TIMEOUT = 12.0
 # single dropped SSH poll. A genuinely unreachable host clears after this.
 REMOTE_GRACE = 30.0
 REMOTE_LINKS = HOME / '.config/tmux-agent-watch/remotes.json'
+# Convention: a dedicated, passphrase-less key named ~/.ssh/agentwatch is
+# offered for every read-only probe when present. This lets an unattended
+# watcher authenticate one hop down (e.g. a jump box → a fleet host) without
+# an ssh-agent or per-host ssh_config, so deep nesting "just works": drop an
+# authorized ~/.ssh/agentwatch on each tier that runs the watcher.
+AGENTWATCH_KEY = HOME / '.ssh' / 'agentwatch'
 
 # Urgency ranking used everywhere states are combined (per-pane, per-window,
 # and when rolling up nested/remote tmux tiers). A tab inherits the MOST urgent
@@ -705,8 +711,11 @@ def remote_probe(target):
     remote_shell = 'sh -s'
     if target.get('socket'):
         remote_shell += ' -- ' + shlex.quote(target['socket'])
+    # Offer the dedicated agentwatch key (in addition to agent/default keys, so
+    # hosts reached via other credentials are unaffected) when it is present.
+    key_opts = ['-i', str(AGENTWATCH_KEY)] if AGENTWATCH_KEY.is_file() else []
     cmd = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectionAttempts=1',
-           '-o', 'ConnectTimeout=4', '-o', 'NumberOfPasswordPrompts=0'] + opts + [host, remote_shell]
+           '-o', 'ConnectTimeout=4', '-o', 'NumberOfPasswordPrompts=0'] + key_opts + opts + [host, remote_shell]
     ssh_env = os.environ.copy()
     # Use the interactive pane's agent socket when it is still live; otherwise
     # find any usable agent rather than handing ssh a stale socket (which makes

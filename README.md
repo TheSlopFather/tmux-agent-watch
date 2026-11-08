@@ -41,6 +41,16 @@ A tab that contains several agents (multiple panes, or an SSH session into a rem
 
 The watcher's read-only probe reaches **one SSH hop**. If you chain through a jump box (`local → jump → fleet`), a probe can't type the interactive password your jump box asked for, so run `tmux-agent-watch` **on the jump box too**. Each tier watches the hop below it and publishes state into its own tmux; walking up the chain, every tier rolls up the most-urgent agent beneath it.
 
+The probe is **non-interactive** (`BatchMode`), so each tier needs a key the next hop accepts without a passphrase or prompt. The watcher looks for a dedicated key at **`~/.ssh/agentwatch`** and offers it automatically (in addition to your agent/default keys, so nothing else is affected). To wire up a hop:
+
+```bash
+# on the tier that runs the watcher (e.g. the jump box):
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/agentwatch -C "agentwatch@$(hostname)"
+ssh-copy-id -i ~/.ssh/agentwatch.pub user@next-hop
+```
+
+No `ssh_config` entry needed — drop that key on each tier and probes just work.
+
 ## Requirements
 
 - Python 3, `tmux`, and `ssh` on the base host (nothing required on remote hosts).
