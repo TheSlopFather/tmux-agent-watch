@@ -24,30 +24,24 @@ When you run several agents across tmux windows — and some of those windows ar
 
 Look, I'm a shameless tmux junkie, and this is how I actually run shit: a local tmux on my box, SSH'd up into a jump box running its own tmux, fanned out across a whole fleet of machines — each one running, you guessed it, *more* goddamn tmux with an agent nested inside. Tiers on tiers on tiers. That's not masochism, that's how I babysit a shitload of agents at scale without losing my mind. I tried `herdr` first and it folded the second I nested that deep, so I said fuck it and vibe coded this slop myself. It works across my whole stack, which is the only benchmark I give a shit about. Your mileage may vary.
 
+```mermaid
+flowchart TD
+    subgraph fleet ["the fleet — an agent in a nested tmux on each box"]
+        h1["host-01<br/>tmux + agent"]
+        h2["host-02<br/>tmux + agent"]
+        h3["host-03<br/>tmux + agent"]
+        hN["host-NN<br/>tmux + agent"]
+    end
+    h1 -->|ssh| J
+    h2 -->|ssh| J
+    h3 -->|ssh| J
+    hN -->|ssh| J
+    J["Jump box · bastion<br/>tmux + watcher<br/>probes every fleet host"] -->|ssh| L
+    L["Local box · you are here<br/>tmux + watcher<br/>the whole fleet's state lands on this one status bar"]
 ```
-      ┌─────────┐   ┌─────────┐   ┌─────────┐           ┌─────────┐
-      │ host-01 │   │ host-02 │   │ host-03 │   · · ·   │ host-NN │   the fleet
-      │  tmux   │   │  tmux   │   │  tmux   │           │  tmux   │   (an agent in a
-      │ + agent │   │ + agent │   │ + agent │           │ + agent │    nested tmux
-      └────┬────┘   └────┬────┘   └────┬────┘           └────┬────┘    on each box)
-           │             │             │                     │
-           └─────────────┴──────┬──────┴─────────────────────┘
-                                │   ssh  (fan-out to the fleet)
-                          ┌─────┴─────┐
-                          │ Jump box  │   bastion: tmux + watcher,
-                          │   tmux    │   probes every fleet host
-                          │ + watcher │
-                          └─────┬─────┘
-                                │   ssh
-                          ┌─────┴─────┐
-                          │ Local box │   you are here: outer tmux + watcher;
-                          │   tmux    │   the whole fleet's state lands on
-                          │ + watcher │   this one status bar
-                          └───────────┘
 
-   state rolls DOWN each hop — every tab inherits the most-urgent agent
-   above it:   ✋ wait  >  🧑‍🔧 ready  >  👨‍💻 work
-```
+State rolls **down** each hop — every tab inherits the most-urgent agent above it:
+✋ wait &nbsp;>&nbsp; 🧑‍🔧 ready &nbsp;>&nbsp; 👨‍💻 work
 
 ## How it works
 
