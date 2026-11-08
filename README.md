@@ -20,7 +20,7 @@ Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **open
 
 When you run several agents across tmux windows — and some of those windows are SSH sessions into *nested* tmux on remote boxes — there's no easy way to see who needs attention without cycling through every window. `tmux-agent-watch` watches them all from one place and surfaces the state in the status bar.
 
-I tried `herdr` first, but it didn't fit my workflow with nested tmux sessions, so we vibe coded this slop instead. It works for me; your mileage may vary.
+Look, I'm a shameless tmux junkie — panes nested in windows nested in sessions nested in *more* goddamn tmux over SSH, because apparently I hate myself. I tried `herdr` first and it just couldn't hang with that cursed nesting, so I said fuck it and vibe coded this slop myself. It works on my machine, which is the only benchmark I give a shit about. Your mileage may vary.
 
 ## How it works
 
