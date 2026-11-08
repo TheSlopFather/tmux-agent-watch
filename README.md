@@ -84,13 +84,17 @@ The watcher's read-only probe reaches **one SSH hop**. If you chain through a ju
 
 Run **more than one fleet behind its own bastion** and the shape is the same, just wider: a watcher on each jump box, each probing its own fleet, and the local box watching every jump box in parallel. Nothing special to configure — each chain is independent, and the local status bar rolls up the most-urgent agent across *all* of them.
 
-The probe is **non-interactive** (`BatchMode`), so each tier needs a key the next hop accepts without a passphrase or prompt. The watcher looks for a dedicated key at **`~/.ssh/agentwatch`** and offers it automatically (in addition to your agent/default keys, so nothing else is affected). To wire up a hop:
+The probe is **non-interactive** (`BatchMode`), so each tier needs a key the next hop accepts without a passphrase or prompt. The watcher looks for a dedicated key at **`~/.ssh/agentwatch`** and offers it automatically (in addition to your agent/default keys, so nothing else is affected).
+
+The easy way to wire up a hop is **[`taw push`](#push-a-tier-onto-a-remote)**, which creates that key (asking first) if you don't have one, installs the watcher on the next hop, and authorizes the key there as a **scoped, read-only** command. If you'd rather do it by hand:
 
 ```bash
 # on the tier that runs the watcher (e.g. the jump box):
 ssh-keygen -t ed25519 -N "" -f ~/.ssh/agentwatch -C "agentwatch@$(hostname)"
-ssh-copy-id -i ~/.ssh/agentwatch.pub user@next-hop
+ssh-copy-id -i ~/.ssh/agentwatch.pub user@next-hop   # NOTE: grants a FULL shell
 ```
+
+`ssh-copy-id` authorizes the key for a normal login (a full shell). `taw push` instead pins it to a forced command, so the key can do nothing but the read-only probe — see [Scoping the probe key](#scoping-the-probe-key).
 
 No `ssh_config` entry needed — drop that key on each tier and probes just work.
 
@@ -161,40 +165,56 @@ git clone https://github.com/gpakosz/.tmux.git ~/.tmux \
 
 That installs oh-my-tmux the standard way (`~/.tmux.conf` symlink + an editable `~/.tmux.conf.local`), then runs the agent-watch installer, which **auto-detects oh-my-tmux** and injects its block into `~/.tmux.conf.local` — your `.tmux.conf` symlink is never touched. Run it on the base host first, then on each jump box (see [Deep nesting](#deep-nesting-jump-boxes)).
 
-### Push a tier onto a remote over SSH
+### Push a tier onto a remote
 
-Standing up a jump box (or any middle tier) means two things on that box: the watcher installed, and the tier **above** it authorized to probe it non-interactively. This one paste does both from your current box — it copies **your local copy of the script** (so whatever you're running here is what lands there, no GitHub round-trip) and installs it:
+Standing up a jump box (or any middle tier) means two things on that box: the watcher installed, and the tier **above** it authorized to probe it non-interactively. `taw push` does both from your current box in one command:
 
 ```bash
-REMOTE=user@jump-box; ssh-copy-id -i ~/.ssh/agentwatch.pub "$REMOTE" && scp tmux-agent-watch.py "$REMOTE":/tmp/taw.py && ssh "$REMOTE" 'python3 /tmp/taw.py && rm -f /tmp/taw.py'
+taw push user@jump-box
 ```
 
-What each step does:
+It:
 
-1. **`ssh-copy-id -i ~/.ssh/agentwatch.pub`** — authorizes *this* box's dedicated probe key on the remote, so your watcher's non-interactive (`BatchMode`) SSH probe can log in. This is the hop that actually makes the remote's state roll up to you.
-2. **`scp tmux-agent-watch.py`** — pushes your working copy to the remote.
-3. **`python3 /tmp/taw.py`** — runs the installer there: it copies itself to `~/.local/bin`, wires the status format into the remote's tmux config (standard *or* oh-my-tmux), installs the local Claude hooks, and starts the watcher. Run against a box with no tmux attached yet, it just defers: *"Watcher will start automatically when you start tmux."*
+1. **Ensures a probe key.** If `~/.ssh/agentwatch` doesn't exist, it offers to create a passphrase-less ed25519 key (ask-first; decline and it aborts).
+2. **Installs the watcher** on the remote. Your **local copy of the script** is streamed over the SSH session itself (base64, no `scp`, no GitHub round-trip), then the installer runs there — copying itself to `~/.local/bin`, wiring the status format into the remote's tmux config (standard *or* oh-my-tmux), installing the Claude hooks, and starting the watcher. Against a box with no tmux attached yet it just defers: *"Watcher will start automatically when you start tmux."*
+3. **Authorizes the probe key — scoped.** It adds (or upgrades) an `authorized_keys` entry pinned to a read-only forced command, so the key can do nothing on that host but the probe. See below.
+4. **Verifies** by running the scoped probe once and reporting what it saw.
 
-Prerequisites and notes:
+Everything is one SSH session, so there's **at most one password prompt** (none if the remote already trusts one of your keys). Pass extra ssh options after `--`, e.g. `taw push user@box -- -p 2222 -J bastion`.
 
-- **This box needs `~/.ssh/agentwatch`** first — generate it with the `ssh-keygen` from [Deep nesting](#deep-nesting-jump-boxes) if you haven't. `ssh-copy-id` will prompt for the remote's password once; that's the only interactive step.
-- **The remote needs `python3` and `tmux`** on `PATH` (nothing else). It does *not* need to reach GitHub — the script is pushed directly.
-- **If that remote is itself a jump box** over a further hop, repeat the same wiring *from the remote* down to its fleet: SSH in, generate its own `~/.ssh/agentwatch`, and `ssh-copy-id` it to the next hop. Each tier probes only the hop directly below it.
-- **Bare box with no tmux config?** Swap in the [from-scratch oneliner](#starting-from-scratch-oh-my-tmux--agent-watch-in-one-go) wrapped in `ssh "$REMOTE" '...'` to lay down oh-my-tmux too.
+Notes:
 
-Verify from your box with `tmux-agent-watch check` — it prints each resolved SSH target and why each state was decided, so a `Permission denied` means step 1 didn't take.
+- **The remote needs `python3`, `tmux`, and `base64`** on `PATH` (nothing else).
+- **If that remote is itself a jump box** over a further hop, SSH in and run `taw push next-hop` *from there* — each tier probes only the hop directly below it.
+- **Bare box with no tmux config?** Use the [from-scratch oneliner](#starting-from-scratch-oh-my-tmux--agent-watch-in-one-go) to lay down oh-my-tmux first; then `taw push`.
+
+Verify any time from your box with `taw check` — it prints each resolved SSH target and why each state was decided, so a `Permission denied` means the key didn't take.
+
+#### Scoping the probe key
+
+The probe's only remote action is a **read-only inventory**: list panes, capture their screens, and walk `ps` to label the agent under each pane. A key never needs a shell to do that, so `taw push` doesn't grant one. Instead of `ssh-copy-id` (which authorizes a full login), it writes an `authorized_keys` entry that **pins the key to a forced command and drops every other capability**:
+
+```
+restrict,command="exec /home/user/.local/bin/tmux-agent-watch _collect" ssh-ed25519 AAAA… agentwatch@yourbox
+```
+
+- **`command="… _collect"`** — sshd ignores whatever the client asks to run and executes only `_collect`, the read-only emitter. Even if the private key leaked, it could not open a shell, read a file, or run any other command on that host.
+- **`restrict`** (OpenSSH 7.2+) — denies PTY allocation and all port/agent/X11 forwarding, and stays deny-by-default for future features.
+
+Re-running `taw push` against a host **upgrades in place**: it finds the existing `agentwatch` line (even an old full-shell `ssh-copy-id` one) and rewrites it to the restricted form, leaving your other keys untouched. The restriction lives entirely in the remote's `authorized_keys` — that's the only place SSH can enforce it — so this is just as effective for a key you distribute widely across a fleet.
 
 ## Usage
 
-Once installed the watcher runs automatically whenever tmux is running; the emoji appear next to window names. Other commands:
+Once installed the watcher runs automatically whenever tmux is running; the emoji appear next to window names. Install also links a short **`taw`** alias (both names run the same tool). Other commands:
 
 ```bash
-tmux-agent-watch check                 # diagnostics: what each pane/remote resolves to
-tmux-agent-watch link %5 gpu-box       # pin outer pane %5 to an SSH host (for undiscoverable nesting)
-tmux-agent-watch link %5 gpu-box mysession /tmp/tmux-1000/custom   # optional session + socket
-tmux-agent-watch unlink %5             # remove a pin
-tmux-agent-watch links                 # list pins
-tmux-agent-watch reset                 # clear local native agent states
+taw push user@host                     # install the watcher on a remote + authorize a scoped probe key
+taw check                              # diagnostics: what each pane/remote resolves to
+taw link %5 gpu-box                    # pin outer pane %5 to an SSH host (for undiscoverable nesting)
+taw link %5 gpu-box mysession /tmp/tmux-1000/custom   # optional session + socket
+taw unlink %5                          # remove a pin
+taw links                              # list pins
+taw reset                              # clear local native agent states
 ```
 
 `check` is the place to start when something isn't showing: it prints the discovered SSH targets, remote sockets, per-window states, and the reason for each decision.
