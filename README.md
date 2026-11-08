@@ -1,6 +1,12 @@
-# tmux-agent-watch
+<p align="center">
+  <img src="assets/logo.png" alt="tmux-agent-watch" width="260">
+</p>
 
-Live status emoji in your **tmux** window list for AI coding agents — local *and* over SSH — so you can tell at a glance which agent is working, which is idle, and which is waiting on you.
+<h1 align="center">tmux-agent-watch</h1>
+
+<p align="center">
+  Live status emoji in your <strong>tmux</strong> window list for AI coding agents — local <em>and</em> over SSH — so you can tell at a glance which agent is working, which is idle, and which is waiting on you.
+</p>
 
 | Emoji | State | Meaning |
 |:---:|:---|:---|
@@ -13,6 +19,8 @@ Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **open
 ## Why
 
 When you run several agents across tmux windows — and some of those windows are SSH sessions into *nested* tmux on remote boxes — there's no easy way to see who needs attention without cycling through every window. `tmux-agent-watch` watches them all from one place and surfaces the state in the status bar.
+
+I tried `herdr` first, but it didn't fit my workflow with nested tmux sessions, so we vibe coded this slop instead. It works for me; your mileage may vary.
 
 ## How it works
 
@@ -35,6 +43,8 @@ Detected state is stored as a tmux window option (`@agentwatch_state`) and rende
 Install **only on the outer/base tmux host**:
 
 ```bash
+git clone https://github.com/TheSlopFather/tmux-agent-watch.git
+cd tmux-agent-watch
 python3 tmux-agent-watch.py
 ```
 
@@ -90,4 +100,4 @@ Handled — the remote probe avoids raw control bytes in tmux formats, which old
 
 ## License
 
-MIT
+MIT — © 2026 Kaiju Security. See [LICENSE](LICENSE).
