@@ -203,6 +203,17 @@ HERMES_WORKING = re.compile('[' + HERMES_SPINNER + r']\s*[A-Za-z]+\s*(?:…|\.\.
 # never inferred from screen redraws. Covers Claude's "esc to interrupt" and
 # Hermes' dialect ("enter interrupt", "ctrl+c stop").
 INTERRUPT = re.compile(r'(?i)(?:esc|enter|ctrl[\+-]c)\s+(?:to\s+)?(?:interrupt|stop)\b')
+# Newer Claude Code "working" footer: a spinner glyph + a rotating (often
+# whimsical) verb + ellipsis + a live elapsed timer, e.g.
+#   "✢ Inferring… (45s · ↓ 3.6k tokens)"
+# The verb set is huge, so match the STRUCTURE, not the word. The composer (❯)
+# stays visible while working, so this must be detected before the composer→
+# ready fallback, or a working turn reads as idle (and, since ready outranks
+# work, that misread then masks the real state across a nested roll-up). Also
+# accept the bare token-delta timer form "(45s · ↓ 3.6k tokens)".
+CLAUDE_WORKING = re.compile(
+    r'(?m)(?:^\W{0,4}[A-Za-z][A-Za-z ]*(?:…|\.{3})\s*\(\s*\d+(?:\.\d+)?s\b'
+    r'|\(\s*\d+(?:\.\d+)?s\s*·\s*[↑↓])')
 
 
 def tmux_args(socket=None):
@@ -324,6 +335,10 @@ def classify(screen, name='', command=''):
                               and not HERMES_COMPOSER.match(l))
     if agent and INTERRUPT.search(recent):
         return 'work', 'visible interrupt affordance'
+    # Claude Code's working footer (spinner + verb… + live timer) stays on
+    # screen alongside the composer; detect it before the composer→ready branch.
+    if agent and CLAUDE_WORKING.search(focus):
+        return 'work', 'working spinner/timer footer'
     if hermes and HERMES_WORKING.search(hermes_status):
         return 'work', 'Hermes TUI activity bar'
     # Fallback for spinner frames outside the known set: a gerund + ellipsis
