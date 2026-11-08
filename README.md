@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="tmux-agent-watch" width="260">
+  <img src="assets/logo.png" alt="tmux-agent-watch" width="440">
 </p>
 
 <h1 align="center">tmux-agent-watch</h1>
