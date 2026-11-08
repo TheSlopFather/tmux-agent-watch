@@ -369,7 +369,11 @@ def classify(screen, name='', command=''):
         return 'work', 'visible interrupt affordance'
     # Claude Code's working footer (spinner + verb… + live timer) stays on
     # screen alongside the composer; detect it before the composer→ready branch.
-    if agent and CLAUDE_WORKING.search(focus):
+    # Skip it for Hermes: Hermes has its own dialect matchers below and prints
+    # the same star glyphs (✦, ☤) as STATIC bullets in prose — e.g. its idle
+    # "✦ Tip: …" welcome line — which the loose spinner branch would misread as
+    # a live turn, flagging an idle Hermes as working.
+    if agent and not hermes and CLAUDE_WORKING.search(focus):
         return 'work', 'working spinner/timer footer'
     if hermes and HERMES_WORKING.search(hermes_status):
         return 'work', 'Hermes TUI activity bar'
