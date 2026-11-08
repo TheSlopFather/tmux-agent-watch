@@ -1059,19 +1059,21 @@ def run_watch(socket):
                     time.sleep(INTERVAL)
                     continue
                 hard_failures = 0
-                # Asymmetric hysteresis: a change INTO an active state (work/
-                # wait) applies at once for responsiveness, but dropping OUT of
-                # one (e.g. work→ready during a brief spinner-less gap mid-turn)
-                # must be confirmed across a couple of scans so the emoji does
-                # not flicker. Escalations and idle↔idle changes are immediate.
-                active = ('work', 'wait')
+                # Asymmetric hysteresis against emoji flicker. Calmness level:
+                # an active turn (work/wait) > idle (ready) > nothing. Any step
+                # UP applies at once for responsiveness; any step DOWN must be
+                # confirmed across DEMOTE_CONFIRM scans, so a single transient
+                # read cannot bounce the emoji — neither work→ready during a
+                # brief spinner-less gap mid-turn, nor ready→blank on a momentary
+                # empty/garbled capture.
+                level = {'': 0, 'ready': 1, 'work': 2, 'wait': 2}
                 for window in set(old) | set(windows):
                     desired = windows.get(window, ('',))[0]
                     current = old.get(window, '')
                     if desired == current:
                         demote_pending.pop(window, None)
                         continue
-                    if current in active and desired not in active:
+                    if level.get(desired, 0) < level.get(current, 0):
                         cand, cnt = demote_pending.get(window, ('', 0))
                         cnt = cnt + 1 if cand == desired else 1
                         if cnt >= DEMOTE_CONFIRM:
