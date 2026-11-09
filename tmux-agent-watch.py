@@ -778,16 +778,15 @@ def remote_probe(target):
     remote_shell = 'sh -s'
     if target.get('socket'):
         remote_shell += ' -- ' + shlex.quote(target['socket'])
-    # When the dedicated probe key exists, use it and ONLY it: IdentityAgent=none
-    # + IdentitiesOnly=yes mean the probe never touches the ssh-agent and never
-    # falls back to the user's login keys, so the restricted key is always what
-    # authenticates and the probe can't pollute the agent. AddKeysToAgent=no is a
-    # further guard. Without the key, fall back to the agent/default keys.
-    if AGENTWATCH_KEY.is_file():
-        key_opts = ['-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none',
-                    '-o', 'AddKeysToAgent=no', '-i', str(AGENTWATCH_KEY)]
-    else:
-        key_opts = []
+    # Offer the dedicated probe key IN ADDITION to the agent/default keys, so a
+    # host that authorizes agentwatch uses the scoped key while a host reached
+    # via your normal key keeps working (don't force IdentitiesOnly here — that
+    # would break every host you haven't `taw push`ed). AddKeysToAgent=no stops
+    # the probe from ever loading the key into your agent; combined with the key
+    # living outside ~/.ssh (so keyrings don't auto-import it), the restricted
+    # key can't leak into — and hijack — your interactive logins.
+    key_opts = (['-o', 'AddKeysToAgent=no', '-i', str(AGENTWATCH_KEY)]
+                if AGENTWATCH_KEY.is_file() else [])
     cmd = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectionAttempts=1',
            '-o', 'ConnectTimeout=4', '-o', 'NumberOfPasswordPrompts=0',
            '-o', 'RequestTTY=no'] + key_opts + opts + [host, remote_shell]
