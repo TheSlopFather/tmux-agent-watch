@@ -60,12 +60,19 @@ REMOTE_TIMEOUT = 12.0
 # single dropped SSH poll. A genuinely unreachable host clears after this.
 REMOTE_GRACE = 30.0
 REMOTE_LINKS = HOME / '.config/tmux-agent-watch/remotes.json'
-# Convention: a dedicated, passphrase-less key named ~/.ssh/agentwatch is
-# offered for every read-only probe when present. This lets an unattended
-# watcher authenticate one hop down (e.g. a jump box → a fleet host) without
-# an ssh-agent or per-host ssh_config, so deep nesting "just works": drop an
-# authorized ~/.ssh/agentwatch on each tier that runs the watcher.
-AGENTWATCH_KEY = HOME / '.ssh' / 'agentwatch'
+# Dedicated, passphrase-less probe key used for every read-only probe when
+# present. It lets an unattended watcher authenticate one hop down (e.g. a jump
+# box → a fleet host) without an ssh-agent or per-host ssh_config, so deep
+# nesting "just works": `taw push` drops an authorized copy on each tier.
+#
+# It lives OUTSIDE ~/.ssh on purpose. A keyring SSH agent (gcr/gnome-keyring)
+# auto-imports any key sitting in ~/.ssh; once this restricted, forced-command
+# key is in the agent, a bare `ssh host` offers it and the server can accept it
+# INSTEAD of a login key, running the read-only collector in place of a shell.
+# Keeping the key in ~/.config keeps it out of that auto-import path entirely.
+# A legacy ~/.ssh/agentwatch is migrated here by migrate_legacy_key().
+AGENTWATCH_KEY = HOME / '.config' / 'tmux-agent-watch' / 'agentwatch'
+LEGACY_AGENTWATCH_KEY = HOME / '.ssh' / 'agentwatch'
 
 # Urgency ranking used everywhere states are combined (per-pane, per-window,
 # and when rolling up nested/remote tmux tiers). A tab inherits the MOST urgent
@@ -771,11 +778,19 @@ def remote_probe(target):
     remote_shell = 'sh -s'
     if target.get('socket'):
         remote_shell += ' -- ' + shlex.quote(target['socket'])
-    # Offer the dedicated agentwatch key (in addition to agent/default keys, so
-    # hosts reached via other credentials are unaffected) when it is present.
-    key_opts = ['-i', str(AGENTWATCH_KEY)] if AGENTWATCH_KEY.is_file() else []
+    # When the dedicated probe key exists, use it and ONLY it: IdentityAgent=none
+    # + IdentitiesOnly=yes mean the probe never touches the ssh-agent and never
+    # falls back to the user's login keys, so the restricted key is always what
+    # authenticates and the probe can't pollute the agent. AddKeysToAgent=no is a
+    # further guard. Without the key, fall back to the agent/default keys.
+    if AGENTWATCH_KEY.is_file():
+        key_opts = ['-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none',
+                    '-o', 'AddKeysToAgent=no', '-i', str(AGENTWATCH_KEY)]
+    else:
+        key_opts = []
     cmd = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectionAttempts=1',
-           '-o', 'ConnectTimeout=4', '-o', 'NumberOfPasswordPrompts=0'] + key_opts + opts + [host, remote_shell]
+           '-o', 'ConnectTimeout=4', '-o', 'NumberOfPasswordPrompts=0',
+           '-o', 'RequestTTY=no'] + key_opts + opts + [host, remote_shell]
     ssh_env = os.environ.copy()
     # Use the interactive pane's agent socket when it is still live; otherwise
     # find any usable agent rather than handing ssh a stale socket (which makes
@@ -1464,9 +1479,67 @@ def local_hostname():
         return 'host'
 
 
+def _key_in_agent(key_path):
+    """True if the public key at key_path is currently loaded in the ssh-agent."""
+    pub = Path(str(key_path) + '.pub')
+    if not pub.is_file() or shutil.which('ssh-add') is None:
+        return False
+    try:
+        body = pub.read_text(encoding='utf-8').split()[1]
+    except (OSError, IndexError):
+        return False
+    listing = subprocess.run(['ssh-add', '-L'], capture_output=True, text=True)
+    return listing.returncode == 0 and body in listing.stdout
+
+
+def _deagent_key(key_path):
+    """Drop a key from the ssh-agent (best effort). Only sticks if the key file
+    is no longer in an auto-import path like ~/.ssh."""
+    if shutil.which('ssh-add') is None:
+        return
+    for target in (str(key_path), str(key_path) + '.pub'):
+        if Path(target).exists():
+            subprocess.run(['ssh-add', '-d', target], capture_output=True, text=True)
+
+
+def migrate_legacy_key():
+    """Move a legacy ~/.ssh/agentwatch probe key out of ~/.ssh so a keyring agent
+    (gcr/gnome-keyring) stops auto-importing it and hijacking interactive SSH.
+    The public key is unchanged, so remote authorized_keys entries keep working.
+    Returns True if anything was migrated."""
+    if AGENTWATCH_KEY.parent == LEGACY_AGENTWATCH_KEY.parent:
+        return False
+    moved = False
+    AGENTWATCH_KEY.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(AGENTWATCH_KEY.parent, 0o700)
+    except OSError:
+        pass
+    for suffix in ('', '.pub'):
+        src = Path(str(LEGACY_AGENTWATCH_KEY) + suffix)
+        dst = Path(str(AGENTWATCH_KEY) + suffix)
+        if not src.is_file():
+            continue
+        try:
+            if dst.exists():
+                src.unlink()  # new location already set up; drop the stray copy
+            else:
+                shutil.move(str(src), str(dst))
+                os.chmod(dst, 0o600 if suffix == '' else 0o644)
+            moved = True
+        except OSError:
+            pass
+    if moved:
+        # The ~/.ssh copy is gone now, so this removal finally sticks.
+        _deagent_key(AGENTWATCH_KEY)
+        _deagent_key(LEGACY_AGENTWATCH_KEY)
+    return moved
+
+
 def ensure_agentwatch_key():
     """Make sure the dedicated probe key exists, creating it on an explicit yes.
     Returns True if a usable key (private + public) is present afterwards."""
+    migrate_legacy_key()
     pub = AGENTWATCH_KEY.with_suffix('.pub')
     if AGENTWATCH_KEY.is_file() and pub.is_file():
         return True
@@ -1572,6 +1645,39 @@ def push_tier(host, ssh_opts):
     return 0
 
 
+def doctor():
+    """Diagnose and safely repair the SSH-identity collision where a keyring
+    agent auto-imports the restricted probe key from ~/.ssh and hijacks
+    interactive logins. Moves (never deletes) the key and clears the agent."""
+    print('tmux-agent-watch doctor — SSH probe-key health')
+    print(f'  probe key: {AGENTWATCH_KEY} ' + ('(present)' if AGENTWATCH_KEY.is_file() else '(none yet)'))
+    issues = 0
+    legacy_pub = Path(str(LEGACY_AGENTWATCH_KEY) + '.pub')
+    if LEGACY_AGENTWATCH_KEY.is_file() or legacy_pub.is_file():
+        issues += 1
+        print(f'  ! legacy key present under {LEGACY_AGENTWATCH_KEY.parent}/')
+        print('    Keyring SSH agents (gcr/gnome-keyring) auto-import keys kept in ~/.ssh. Because this')
+        print('    key is restricted to the read-only collector, a bare `ssh host` can authenticate with')
+        print('    it and run the collector INSTEAD of opening a shell.')
+        if migrate_legacy_key():
+            print(f'    FIXED: moved it to {AGENTWATCH_KEY} (same public key, remotes unaffected) and')
+            print('           removed the auto-imported copy from the ssh-agent.')
+    if _key_in_agent(AGENTWATCH_KEY):
+        issues += 1
+        print('  ! the probe key is loaded in your ssh-agent; interactive `ssh host` may offer it.')
+        _deagent_key(AGENTWATCH_KEY)
+        if _key_in_agent(AGENTWATCH_KEY):
+            print('    Still present after removal — something is re-importing it. Ensure the key is NOT')
+            print(f'    in ~/.ssh (it should be at {AGENTWATCH_KEY}).')
+        else:
+            print('    FIXED: removed it from the ssh-agent.')
+    if issues == 0:
+        print('  OK — probe key is outside ~/.ssh and not in the agent; interactive SSH is unaffected.')
+    print('Probes authenticate with this key directly (IdentitiesOnly, no agent), so keeping it out')
+    print('of the agent does not affect monitoring.')
+    return 0
+
+
 def install(uninstall=False):
     if os.geteuid() == 0 and HOME == Path('/root'):
         print('Run as your normal user, not root/sudo.', file=sys.stderr)
@@ -1588,6 +1694,8 @@ def install(uninstall=False):
             shutil.copy2(source, BIN)
         BIN.chmod(0o755)
         aliased = ensure_alias()
+        if migrate_legacy_key():
+            print(f'Moved probe key out of ~/.ssh to {AGENTWATCH_KEY} (avoids keyring auto-import that hijacks SSH).')
         update_config(cfg, ohmy, False)
         updated_hooks = update_claude_hooks(False)
         print(f'Installed on this machine only: {BIN}')
@@ -1628,13 +1736,15 @@ def install(uninstall=False):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('command', nargs='?', default='install',
-                    choices=['install', 'start', 'stop', 'check', 'event', 'reset', 'link', 'unlink', 'links', 'push', '_watch', '_collect'])
+                    choices=['install', 'start', 'stop', 'check', 'event', 'reset', 'link', 'unlink', 'links', 'push', 'doctor', '_watch', '_collect'])
     ap.add_argument('socket', nargs='?')
     ap.add_argument('extra', nargs='*')
     ap.add_argument('--uninstall', action='store_true')
     args = ap.parse_args()
     if args.command == '_collect':
         return collect_inventory(args.socket)
+    if args.command == 'doctor':
+        return doctor()
     if args.command == 'push':
         if not args.socket:
             ap.error('usage: taw push [user@]host [-- ssh-options…]')

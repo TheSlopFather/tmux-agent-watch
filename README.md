@@ -84,14 +84,17 @@ The watcher's read-only probe reaches **one SSH hop**. If you chain through a ju
 
 Run **more than one fleet behind its own bastion** and the shape is the same, just wider: a watcher on each jump box, each probing its own fleet, and the local box watching every jump box in parallel. Nothing special to configure — each chain is independent, and the local status bar rolls up the most-urgent agent across *all* of them.
 
-The probe is **non-interactive** (`BatchMode`), so each tier needs a key the next hop accepts without a passphrase or prompt. The watcher looks for a dedicated key at **`~/.ssh/agentwatch`** and offers it automatically (in addition to your agent/default keys, so nothing else is affected).
+The probe is **non-interactive** (`BatchMode`), so each tier needs a key the next hop accepts without a passphrase or prompt. The watcher uses a dedicated key at **`~/.config/tmux-agent-watch/agentwatch`** and authenticates with that key *only* — never your agent or login keys.
+
+> **Why not `~/.ssh`?** A keyring SSH agent (gcr/gnome-keyring) auto-imports any key kept in `~/.ssh`. Since this key is restricted to the read-only collector, once it's in your agent a bare `ssh host` can authenticate with it and run the collector *instead of giving you a shell*. Keeping the key under `~/.config` stays out of that auto-import path. A legacy `~/.ssh/agentwatch` is migrated automatically on the next `install`, `taw push`, or `taw doctor`.
 
 The easy way to wire up a hop is **[`taw push`](#push-a-tier-onto-a-remote)**, which creates that key (asking first) if you don't have one, installs the watcher on the next hop, and authorizes the key there as a **scoped, read-only** command. If you'd rather do it by hand:
 
 ```bash
 # on the tier that runs the watcher (e.g. the jump box):
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/agentwatch -C "agentwatch@$(hostname)"
-ssh-copy-id -i ~/.ssh/agentwatch.pub user@next-hop   # NOTE: grants a FULL shell
+mkdir -p ~/.config/tmux-agent-watch
+ssh-keygen -t ed25519 -N "" -f ~/.config/tmux-agent-watch/agentwatch -C "agentwatch@$(hostname)"
+ssh-copy-id -i ~/.config/tmux-agent-watch/agentwatch.pub user@next-hop   # NOTE: grants a FULL shell
 ```
 
 `ssh-copy-id` authorizes the key for a normal login (a full shell). `taw push` instead pins it to a forced command, so the key can do nothing but the read-only probe — see [Scoping the probe key](#scoping-the-probe-key).
@@ -175,7 +178,7 @@ taw push user@jump-box
 
 It:
 
-1. **Ensures a probe key.** If `~/.ssh/agentwatch` doesn't exist, it offers to create a passphrase-less ed25519 key (ask-first; decline and it aborts).
+1. **Ensures a probe key.** If `~/.config/tmux-agent-watch/agentwatch` doesn't exist, it offers to create a passphrase-less ed25519 key (ask-first; decline and it aborts). A legacy `~/.ssh/agentwatch` is migrated to the new location first.
 2. **Installs the watcher** on the remote. Your **local copy of the script** is streamed over the SSH session itself (base64, no `scp`, no GitHub round-trip), then the installer runs there — copying itself to `~/.local/bin`, wiring the status format into the remote's tmux config (standard *or* oh-my-tmux), installing the Claude hooks, and starting the watcher. Against a box with no tmux attached yet it just defers: *"Watcher will start automatically when you start tmux."*
 3. **Authorizes the probe key — scoped.** It adds (or upgrades) an `authorized_keys` entry pinned to a read-only forced command, so the key can do nothing on that host but the probe. See below.
 4. **Verifies** by running the scoped probe once and reporting what it saw.
@@ -203,12 +206,15 @@ restrict,command="exec /home/user/.local/bin/tmux-agent-watch _collect" ssh-ed25
 
 Re-running `taw push` against a host **upgrades in place**: it finds the existing `agentwatch` line (even an old full-shell `ssh-copy-id` one) and rewrites it to the restricted form, leaving your other keys untouched. The restriction lives entirely in the remote's `authorized_keys` — that's the only place SSH can enforce it — so this is just as effective for a key you distribute widely across a fleet.
 
+**Identity isolation.** The restricted key cuts both ways: because it is forced to the collector, you don't want it offered during *your own* interactive logins (SSH would authenticate with it and run the collector instead of giving you a shell). Two things keep that from happening: the key lives under `~/.config`, not `~/.ssh`, so keyring agents don't auto-import it; and every probe authenticates with `IdentitiesOnly=yes -o IdentityAgent=none -i …agentwatch`, so it uses that key alone and never touches — or pollutes — your ssh-agent. If a legacy `~/.ssh/agentwatch` ever causes the collision, **`taw doctor`** detects and repairs it (moves the key out of `~/.ssh`, clears the agent) without weakening the remote restriction.
+
 ## Usage
 
 Once installed the watcher runs automatically whenever tmux is running; the emoji appear next to window names. Install also links a short **`taw`** alias (both names run the same tool). Other commands:
 
 ```bash
 taw push user@host                     # install the watcher on a remote + authorize a scoped probe key
+taw doctor                             # check/repair the probe key's SSH-identity isolation
 taw check                              # diagnostics: what each pane/remote resolves to
 taw link %5 gpu-box                    # pin outer pane %5 to an SSH host (for undiscoverable nesting)
 taw link %5 gpu-box mysession /tmp/tmux-1000/custom   # optional session + socket
@@ -236,6 +242,9 @@ The remote tmux is on a non-default socket or a different user. Check `TMUX_TMPD
 
 **A remote emoji briefly flickers off and back.**
 A single dropped or slow SSH poll used to blank a hidden-window agent's state until the next poll. The watcher now serves the last good remote result for a short grace period, so a transient probe failure no longer causes a flicker; a genuinely unreachable host still clears after the grace expires.
+
+**`ssh host` prints `AWBEGIN …` / `PTY allocation request failed` instead of giving a shell.**
+A keyring agent auto-imported the restricted probe key from a legacy `~/.ssh/agentwatch`, and SSH is now authenticating your interactive login with it — so the server runs the read-only collector instead of a shell. Run **`taw doctor`**: it moves the key out of `~/.ssh` (keyrings don't scan `~/.config`) and clears it from the agent, restoring normal logins. Don't remove the remote `restrict`/forced-command — that's the security boundary, not the bug.
 
 **Old remote tmux (< 3.6).**
 Handled — the remote probe avoids raw control bytes in tmux formats, which older tmux (e.g. 3.5a) octal-escapes.
