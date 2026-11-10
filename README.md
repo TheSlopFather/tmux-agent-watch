@@ -14,7 +14,7 @@
 | 🧑‍🔧 | `ready` | Agent is idle, waiting for your next prompt |
 | ✋ | `wait` | Agent needs input — a permission/approval or choice prompt |
 
-When an agent hits ✋ `wait`, its **unfocused tab flashes**.
+When an agent hits ✋ `wait`, its **unfocused tab flashes** until you switch to it. A tab also flashes when an agent **finishes a task** (👨‍💻 `work` → 🧑‍🔧 `ready`) while you're looking at another tab — so you notice it's done — and stops the moment you browse to it once.
 
 Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **opencode**, **aider**.
 
@@ -48,7 +48,7 @@ flowchart TD
 ```
 
 State rolls **down** each hop — every tab inherits the most-urgent agent above it:
-✋ wait &nbsp;>&nbsp; 🧑‍🔧 ready &nbsp;>&nbsp; 👨‍💻 work
+✋ wait &nbsp;>&nbsp; 👨‍💻 work &nbsp;>&nbsp; 🧑‍🔧 ready
 
 ## How it works
 
@@ -76,7 +76,7 @@ Want a known-good starting point? [`examples/tmux.conf.local`](examples/tmux.con
 
 ### Most-urgent roll-up
 
-A tab that contains several agents (multiple panes, or an SSH session into a remote with many agent windows) shows the **most urgent** state beneath it: **✋ `wait` > 🧑‍🔧 `ready` > 👨‍💻 `work`**. So a box where one agent needs you and three are busy shows ✋ — you never miss the one that's waiting.
+A tab that contains several agents (multiple panes, or an SSH session into a remote with many agent windows) shows the **most urgent** state beneath it: **✋ `wait` > 👨‍💻 `work` > 🧑‍🔧 `ready`**. So a box where one agent needs you and three are busy shows ✋ — you never miss the one that's waiting, and an active 👨‍💻 agent is never hidden by an idle sibling.
 
 ### Deep nesting (jump boxes)
 

@@ -36,17 +36,20 @@ CLAUDE_HOOK_MARKER = '.local/bin/tmux-agent-watch" event '
 MARK_START = '# >>> tmux-agent-watch base-only >>>'
 MARK_END = '# <<< tmux-agent-watch base-only <<<' 
 WINDOW_FLAG = '#{?#{==:#{@agentwatch_state},wait}, ✋,#{?#{==:#{@agentwatch_state},work}, 👨‍💻,#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}'
-# Flash an unfocused tab whose agent needs you (wait). Rather than the SGR
-# blink attribute — which terminals drive off their own timer (urxvt resets it
-# on every keypress/mouse move, so the flash stops exactly when you're busy
-# elsewhere, and kitty ignores it entirely) — the watcher drives the flash
-# itself: it toggles the global @agentwatch_blink option a few times a second
-# while any window waits and forces a status redraw. The format inverts the
-# tab (reverse video) on the "on" phase, giving a reliable flash on any
-# terminal. Applied only to the non-current window format, so focusing the
-# window stops the flash.
-FLASH_ON = '#{?#{==:#{@agentwatch_state},wait},#{?#{==:#{@agentwatch_blink},on},#[reverse],},}'
-FLASH_OFF = '#{?#{==:#{@agentwatch_state},wait},#[noreverse],}'
+# Flash an unfocused tab that needs your eyes: either an agent waiting on you
+# (state==wait) or one that just FINISHED a task while you were looking elsewhere
+# (@agentwatch_done, set on an active→ready transition and cleared the moment you
+# browse to the tab). Rather than the SGR blink attribute — which terminals drive
+# off their own timer (urxvt resets it on every keypress/mouse move, so the flash
+# stops exactly when you're busy elsewhere, and kitty ignores it entirely) — the
+# watcher drives the flash itself: it toggles the global @agentwatch_blink option
+# a few times a second while any such window exists and forces a status redraw.
+# The format inverts the tab (reverse video) on the "on" phase, giving a reliable
+# flash on any terminal. Applied only to the non-current window format, so
+# focusing the window stops the flash (and retires the done flag).
+FLASH_WHEN = '#{||:#{==:#{@agentwatch_state},wait},#{==:#{@agentwatch_done},on}}'
+FLASH_ON = '#{?#{&&:' + FLASH_WHEN + ',#{==:#{@agentwatch_blink},on}},#[reverse],}'
+FLASH_OFF = '#{?' + FLASH_WHEN + ',#[noreverse],}'
 BLINK_PERIOD = 0.5
 INTERVAL = 2.0
 # Consecutive scans an active→idle demotion (e.g. work→ready) must persist
@@ -319,9 +322,36 @@ def set_state(socket, window, state):
 
 
 def set_blink(socket, on):
-    """Drive the wait-flash: toggle the global phase and force a status redraw."""
+    """Drive the flash: toggle the global phase and force a status redraw."""
     tmux_call(socket, 'set-option', '-g', '@agentwatch_blink', 'on' if on else 'off')
     tmux_call(socket, 'refresh-client', '-S')
+
+
+def set_done(socket, window, on):
+    """Mark/clear a window that finished a task while unfocused. The tab flashes
+    while this is set; it's cleared the moment the window is browsed to."""
+    if on:
+        tmux_call(socket, 'set-option', '-w', '-t', window, '@agentwatch_done', 'on')
+    else:
+        tmux_call(socket, 'set-option', '-wu', '-t', window, '@agentwatch_done')
+
+
+def window_flags(socket):
+    """Return (active_window_ids, done_window_ids) in a single tmux pass.
+    `active` are the current window of each session (what you're looking at);
+    `done` carry an unseen-finish flag."""
+    active, done = set(), set()
+    r = tmux_call(socket, 'list-windows', '-a', '-F',
+                  '#{window_id}\t#{window_active}\t#{@agentwatch_done}')
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            parts = line.split('\t')
+            if len(parts) >= 3:
+                if parts[1] == '1':
+                    active.add(parts[0])
+                if parts[2] == 'on':
+                    done.add(parts[0])
+    return active, done
 
 
 def list_panes(socket):
@@ -1160,6 +1190,10 @@ def run_watch(socket):
                 # brief spinner-less gap mid-turn, nor ready→blank on a momentary
                 # empty/garbled capture.
                 level = {'': 0, 'ready': 1, 'work': 2, 'wait': 2}
+                # Who you're looking at, and which tabs still carry an unseen
+                # finish, read authoritatively so an external clear (or a stale
+                # flag from a previous daemon) is reconciled each scan.
+                active_now, done_on = window_flags(socket)
                 for window in set(old) | set(windows):
                     desired = windows.get(window, ('',))[0]
                     current = old.get(window, '')
@@ -1171,6 +1205,13 @@ def run_watch(socket):
                         cnt = cnt + 1 if cand == desired else 1
                         if cnt >= DEMOTE_CONFIRM:
                             set_state(socket, window, desired)
+                            # Finished a task (active turn → ready) while you were
+                            # on another tab: flag it so the tab flashes until you
+                            # look. If it finished while focused, it's already seen.
+                            if (desired == 'ready' and current in ('work', 'wait')
+                                    and window not in active_now):
+                                set_done(socket, window, True)
+                                done_on.add(window)
                             old[window] = desired
                             demote_pending.pop(window, None)
                         else:
@@ -1179,14 +1220,27 @@ def run_watch(socket):
                         set_state(socket, window, desired)
                         old[window] = desired
                         demote_pending.pop(window, None)
-                # While any window is waiting on the user, flash it: toggle the
-                # reverse-video phase every BLINK_PERIOD across the inter-scan
-                # gap. Otherwise just sleep, leaving the phase off.
-                if any(s == 'wait' for s in old.values()):
+                # Retire a finish flag once the tab has been browsed to (it is the
+                # active window now) or has moved off ready (a new turn started).
+                for window in list(done_on):
+                    if window in active_now or old.get(window, '') != 'ready':
+                        set_done(socket, window, False)
+                        done_on.discard(window)
+                # Flash while any window waits on you or holds an unseen finish:
+                # toggle the reverse-video phase every BLINK_PERIOD across the
+                # inter-scan gap, re-checking focus each tick so the flash (and the
+                # flag) stop the instant you switch to the tab.
+                if any(s == 'wait' for s in old.values()) or done_on:
                     deadline = time.monotonic() + INTERVAL
                     while live:
                         blink_phase = not blink_phase
                         set_blink(socket, blink_phase)
+                        if done_on:
+                            active_tick, _ = window_flags(socket)
+                            for window in list(done_on):
+                                if window in active_tick:
+                                    set_done(socket, window, False)
+                                    done_on.discard(window)
                         if time.monotonic() >= deadline:
                             break
                         time.sleep(BLINK_PERIOD)
@@ -1203,6 +1257,7 @@ def run_watch(socket):
             if not live:
                 for window in old:
                     set_state(socket, window, '')
+                    set_done(socket, window, False)
                 tmux_call(socket, 'set-option', '-gu', '@agentwatch_blink')
             try:
                 if path.read_text().strip() == str(os.getpid()):
