@@ -35,19 +35,25 @@ CLAUDE_SETTINGS = HOME / '.claude/settings.json'
 CLAUDE_HOOK_MARKER = '.local/bin/tmux-agent-watch" event '
 MARK_START = '# >>> tmux-agent-watch base-only >>>'
 MARK_END = '# <<< tmux-agent-watch base-only <<<' 
-WINDOW_FLAG = '#{?#{==:#{@agentwatch_state},wait}, ✋,#{?#{==:#{@agentwatch_state},work}, 👨‍💻,#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}'
-# Flash an unfocused tab that needs your eyes: either an agent waiting on you
-# (state==wait) or one that just FINISHED a task while you were looking elsewhere
-# (@agentwatch_done, set on an active→ready transition and cleared the moment you
-# browse to the tab). Rather than the SGR blink attribute — which terminals drive
-# off their own timer (urxvt resets it on every keypress/mouse move, so the flash
-# stops exactly when you're busy elsewhere, and kitty ignores it entirely) — the
-# watcher drives the flash itself: it toggles the global @agentwatch_blink option
-# a few times a second while any such window exists and forces a status redraw.
-# The format inverts the tab (reverse video) on the "on" phase, giving a reliable
-# flash on any terminal. Applied only to the non-current window format, so
-# focusing the window stops the flash (and retires the done flag).
-FLASH_WHEN = '#{||:#{==:#{@agentwatch_state},wait},#{==:#{@agentwatch_done},on}}'
+# Tab emoji, in display-priority order: ✋ wait, 👨‍💻 work, ✅ done, 🧑‍🔧 ready.
+# ✅ "done" is an overlay carried by @agentwatch_done (set when the agent finished
+# a turn while you were on another tab) on top of the underlying ready state, so
+# the visible roll-down is wait > work > done > ready. It shows a steady ✅ until
+# you've viewed the tab and navigated away again (then it reverts to 🧑‍🔧 ready).
+WINDOW_FLAG = ('#{?#{==:#{@agentwatch_state},wait}, ✋,'
+               '#{?#{==:#{@agentwatch_state},work}, 👨‍💻,'
+               '#{?#{==:#{@agentwatch_done},on}, ✅,'
+               '#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}}')
+# Flashing is reserved for information you must act on NOW: an agent waiting on
+# you (state==wait). ✅ done is informational, so it does NOT flash. Rather than
+# the SGR blink attribute — which terminals drive off their own timer (urxvt
+# resets it on every keypress/mouse move, so the flash stops exactly when you're
+# busy elsewhere, and kitty ignores it entirely) — the watcher drives the flash
+# itself: it toggles the global @agentwatch_blink option a few times a second
+# while any such window exists and forces a status redraw. The format inverts the
+# tab (reverse video) on the "on" phase, giving a reliable flash on any terminal.
+# Applied only to the non-current window format, so focusing the window stops it.
+FLASH_WHEN = '#{==:#{@agentwatch_state},wait}'
 FLASH_ON = '#{?#{&&:' + FLASH_WHEN + ',#{==:#{@agentwatch_blink},on}},#[reverse],}'
 FLASH_OFF = '#{?' + FLASH_WHEN + ',#[noreverse],}'
 BLINK_PERIOD = 0.5
@@ -77,12 +83,14 @@ REMOTE_LINKS = HOME / '.config/tmux-agent-watch/remotes.json'
 AGENTWATCH_KEY = HOME / '.config' / 'tmux-agent-watch' / 'agentwatch'
 LEGACY_AGENTWATCH_KEY = HOME / '.ssh' / 'agentwatch'
 
-# Urgency ranking used everywhere states are combined (per-pane, per-window,
-# and when rolling up nested/remote tmux tiers). A tab inherits the MOST urgent
-# state of any agent beneath it: wait (needs a human) > work (active, something
-# is happening) > ready (idle, awaiting a prompt) > none. Active work outranks
-# an idle sibling, so a working agent is never hidden by a ready one on the same
-# host; ready surfaces only when nothing beneath is working or waiting.
+# Urgency ranking used everywhere classified states are combined (per-pane,
+# per-window, and when rolling up nested/remote tmux tiers). A tab inherits the
+# MOST urgent state of any agent beneath it: wait (needs a human) > work (active,
+# something is happening) > ready (idle) > none. Active work outranks an idle
+# sibling, so a working agent is never hidden by a ready one on the same host.
+# The ✅ "done" state is NOT classified from a screen — it is a per-window overlay
+# latched onto a window whose rolled-up state just fell from work to ready while
+# unfocused, so the full VISIBLE order is wait > work > done > ready.
 PRIORITY = {'': 0, 'ready': 1, 'work': 2, 'wait': 3}
 
 # Read-only remote inventory. The login tmux server is not necessarily the
@@ -1168,6 +1176,7 @@ def run_watch(socket):
         remote_cache = {}
         remote_memory = {}
         demote_pending = {}
+        done_seen = set()  # windows whose ✅ done you've viewed; retired on leave
         hard_failures = 0
         blink_phase = False
         try:
@@ -1214,11 +1223,12 @@ def run_watch(socket):
                         cnt = cnt + 1 if cand == desired else 1
                         if cnt >= DEMOTE_CONFIRM:
                             set_state(socket, window, desired)
-                            # Finished a task (active turn → ready) while you were
-                            # on another tab: flag it so the tab flashes until you
-                            # look. If it finished while focused, it's already seen.
-                            if (desired == 'ready' and current in ('work', 'wait')
-                                    and window not in active_now):
+                            # Finished a task (an active turn → ready): show ✅ done
+                            # whether or not you were watching. If it finished in the
+                            # focused window, ✅ shows there too and is retired when
+                            # you navigate away (the lifecycle below treats a
+                            # currently-focused tab as already viewed).
+                            if desired == 'ready' and current in ('work', 'wait'):
                                 set_done(socket, window, True)
                                 done_on.add(window)
                             old[window] = desired
@@ -1229,27 +1239,28 @@ def run_watch(socket):
                         set_state(socket, window, desired)
                         old[window] = desired
                         demote_pending.pop(window, None)
-                # Retire a finish flag once the tab has been browsed to (it is the
-                # active window now) or has moved off ready (a new turn started).
+                # ✅ done lifecycle: it stays while you haven't looked; once you've
+                # viewed the tab (it became active) it is retired when you navigate
+                # away again, reverting to 🧑‍🔧 ready. New work/wait on the agent
+                # (state no longer ready) retires it at once — you'll see 👨‍💻/✋.
                 for window in list(done_on):
-                    if window in active_now or old.get(window, '') != 'ready':
+                    if old.get(window, '') != 'ready':
                         set_done(socket, window, False)
                         done_on.discard(window)
-                # Flash while any window waits on you or holds an unseen finish:
-                # toggle the reverse-video phase every BLINK_PERIOD across the
-                # inter-scan gap, re-checking focus each tick so the flash (and the
-                # flag) stop the instant you switch to the tab.
-                if any(s == 'wait' for s in old.values()) or done_on:
+                    elif window in active_now:
+                        done_seen.add(window)
+                    elif window in done_seen:
+                        set_done(socket, window, False)
+                        done_on.discard(window)
+                done_seen &= done_on
+                # Flash only what you must act on NOW (✋ wait): toggle the
+                # reverse-video phase every BLINK_PERIOD across the inter-scan gap.
+                # ✅ done is steady and never flashes.
+                if any(s == 'wait' for s in old.values()):
                     deadline = time.monotonic() + INTERVAL
                     while live:
                         blink_phase = not blink_phase
                         set_blink(socket, blink_phase)
-                        if done_on:
-                            active_tick, _ = window_flags(socket)
-                            for window in list(done_on):
-                                if window in active_tick:
-                                    set_done(socket, window, False)
-                                    done_on.discard(window)
                         if time.monotonic() >= deadline:
                             break
                         time.sleep(BLINK_PERIOD)
@@ -1773,7 +1784,7 @@ def install(uninstall=False):
             restart_watch(sock)
         else:
             print('Watcher will start automatically when you start tmux.')
-        print('Indicators: ✋ input needed; 👨‍💻 working; 🧑‍🔧 ready/idle.')
+        print('Indicators: ✋ input needed (flashes); 👨‍💻 working; ✅ just finished (until you look); 🧑‍🔧 ready/idle.')
         print('Local Claude Code: native hooks installed; restart Claude to load them.' if updated_hooks else 'Local Claude Code: native hook configuration unchanged or unavailable.')
         print('Remote nested tmux: inspects hidden windows, with per-pane agent process identification.')
         print(f'Diagnostics: taw check  ·  Push a remote tier: taw push user@host')
