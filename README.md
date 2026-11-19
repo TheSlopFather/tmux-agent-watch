@@ -11,10 +11,13 @@
 | Emoji | State | Meaning |
 |:---:|:---|:---|
 | 👨‍💻 | `work` | Agent is actively working on a turn |
+| ✅ | `done` | Agent just finished a task while you were on another tab |
 | 🧑‍🔧 | `ready` | Agent is idle, waiting for your next prompt |
 | ✋ | `wait` | Agent needs input — a permission/approval or choice prompt |
 
-When an agent hits ✋ `wait`, its **unfocused tab flashes** until you switch to it. A tab also flashes when an agent **finishes a task** (👨‍💻 `work` → 🧑‍🔧 `ready`) while you're looking at another tab — so you notice it's done — and stops the moment you browse to it once.
+**✋ `wait` flashes.** Flashing is reserved for the one thing you must act on *now* — an agent waiting on your input — so an unfocused ✋ tab flashes until you switch to it.
+
+**✅ `done` is a steady nudge.** When an agent finishes a turn (👨‍💻 → idle) while you're looking at another tab, that tab shows ✅ instead of 🧑‍🔧, so you can see at a glance which agents finished while you were away. It stays ✅ until you've viewed the tab and navigated away again, then settles to 🧑‍🔧 `ready` — unless you give the agent new work first, in which case it goes straight back to 👨‍💻.
 
 Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **opencode**, **aider**.
 
@@ -48,7 +51,7 @@ flowchart TD
 ```
 
 State rolls **down** each hop — every tab inherits the most-urgent agent above it:
-✋ wait &nbsp;>&nbsp; 👨‍💻 work &nbsp;>&nbsp; 🧑‍🔧 ready
+✋ wait &nbsp;>&nbsp; 👨‍💻 work &nbsp;>&nbsp; ✅ done &nbsp;>&nbsp; 🧑‍🔧 ready
 
 ## How it works
 
@@ -76,7 +79,7 @@ Want a known-good starting point? [`examples/tmux.conf.local`](examples/tmux.con
 
 ### Most-urgent roll-up
 
-A tab that contains several agents (multiple panes, or an SSH session into a remote with many agent windows) shows the **most urgent** state beneath it: **✋ `wait` > 👨‍💻 `work` > 🧑‍🔧 `ready`**. So a box where one agent needs you and three are busy shows ✋ — you never miss the one that's waiting, and an active 👨‍💻 agent is never hidden by an idle sibling.
+A tab that contains several agents (multiple panes, or an SSH session into a remote with many agent windows) shows the **most urgent** state beneath it: **✋ `wait` > 👨‍💻 `work` > ✅ `done` > 🧑‍🔧 `ready`**. So a box where one agent needs you and three are busy shows ✋ — you never miss the one that's waiting, an active 👨‍💻 agent is never hidden by an idle sibling, and a freshly-finished ✅ shows only once nothing beneath it is still working or waiting.
 
 ### Deep nesting (jump boxes)
 
