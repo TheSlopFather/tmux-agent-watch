@@ -218,6 +218,14 @@ DECISION_FOOTER = re.compile(r'(?i)(?:esc to cancel|tab to amend|enter to select
 NUMBERED = re.compile(r'(?m)^\s*[❯›>]?\s*[1-9][.)]\s+\S+')
 AGENT_NAMES = re.compile(r'(?i)(?:\bhermes\b|\bclaude\b|\bcodex\b|\bgemini\b|\bopencode\b|\bopen.?code\b|\baider\b|\b(?:copilot|cursor)\b)')
 AGENT_UI = re.compile(r'(?i)(?:hermes agent|hermes cli|claude code|openai codex|gemini cli|opencode|context left|bypass permissions|accept edits|shift\+tab to cycle)')
+# Hermes' persistent status bar is its most reliable fingerprint: the bar opens
+# with the caduceus sigil ☤ and (idle) closes with the "/ commands · @ files ·
+# ! shell" hint. Its window is often named just "python3", and the screen text
+# is an unreliable identity cue — a Hermes session researching AI agents prints
+# other agents' names, so keyword matching flickers on/off as the view scrolls
+# and the emoji vanishes whenever none happen to be on screen. This chrome is
+# always at the bottom, so detect Hermes from it instead.
+HERMES_UI = re.compile(r'☤|/\s*commands\b[^\n]*@\s*files\b[^\n]*!\s*shell\b')
 # Screen changes are NEVER proof of agent work. Typing also changes a screen.
 # The remote fallback recognizes only explicit live UI signals, not activity
 # inferred from terminal redraws or a session's scrollback.
@@ -379,7 +387,8 @@ def classify(screen, name='', command=''):
     focus_lines = lines[-12:]
     focus = '\n'.join(focus_lines)
     identity = name + '\n' + command + '\n' + '\n'.join(lines[:5] + lines[-8:])
-    agent = bool(AGENT_NAMES.search(identity) or AGENT_UI.search(identity))
+    hermes_ui = bool(HERMES_UI.search(identity))
+    agent = bool(AGENT_NAMES.search(identity) or AGENT_UI.search(identity) or hermes_ui)
     explicit = bool(EXPLICIT.search(focus))
     choices = len(CHOICES.findall(focus))
     hints = bool(DECISION_FOOTER.search(focus))
@@ -405,7 +414,7 @@ def classify(screen, name='', command=''):
     # Hermes publishes its state in a footer activity bar. Evaluate live-turn
     # (busy) signals BEFORE any composer, because Hermes keeps its composer
     # ("❯ type to redirect this turn") visible on screen while still working.
-    hermes = bool(re.search(r'(?i)\bhermes\b', name + ' ' + command))
+    hermes = bool(re.search(r'(?i)\bhermes\b', name + ' ' + command) or hermes_ui)
     # Footer region, widened to span the whole Hermes status block, with the
     # composer line(s) removed so typed/queued text cannot mask the bar.
     hermes_status = '\n'.join(l for l in lines[-6:]
