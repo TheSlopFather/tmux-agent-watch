@@ -19,6 +19,8 @@
 
 **✅ `done` is a steady nudge.** When an agent finishes a turn (👨‍💻 → idle) while you're looking at another tab, that tab shows ✅ instead of 🧑‍🔧, so you can see at a glance which agents finished while you were away. It stays ✅ until you've viewed the tab and navigated away again, then settles to 🧑‍🔧 `ready` — unless you give the agent new work first, in which case it goes straight back to 👨‍💻.
 
+**✅ across tiers.** When the finished agent is up a tier (an SSH tab into a remote, or a jump box), the ✅ on your local tab *mirrors* the one on the agent's own window up there — it's a "something finished down there, go look" signal, not something you can dismiss with a glance. Tabbing past the local tab won't clear it; it clears only when the agent's own ✅ clears (you drilled in and viewed its window up there) or the agent gets new work. Needs the watcher updated on both tiers (`taw push` each).
+
 Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **opencode**, **aider**.
 
 ## Why
