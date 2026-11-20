@@ -143,9 +143,9 @@ agent_under_root() {
 emit_panes() {
   sock="$1"
   if [ "$sock" = default ]; then
-    inventory="$("$TMUX_BIN" list-panes -a -F '#{pane_id}@@AWF@@#{session_name}@@AWF@@#{window_name}@@AWF@@#{pane_current_command}@@AWF@@#{pane_title}@@AWF@@#{window_active}@@AWF@@#{pane_pid}' 2>/dev/null)" || return 1
+    inventory="$("$TMUX_BIN" list-panes -a -F '#{pane_id}@@AWF@@#{session_name}@@AWF@@#{window_name}@@AWF@@#{pane_current_command}@@AWF@@#{pane_title}@@AWF@@#{window_active}@@AWF@@#{pane_pid}@@AWF@@#{@agentwatch_done}' 2>/dev/null)" || return 1
   else
-    inventory="$("$TMUX_BIN" -S "$sock" list-panes -a -F '#{pane_id}@@AWF@@#{session_name}@@AWF@@#{window_name}@@AWF@@#{pane_current_command}@@AWF@@#{pane_title}@@AWF@@#{window_active}@@AWF@@#{pane_pid}' 2>/dev/null)" || return 1
+    inventory="$("$TMUX_BIN" -S "$sock" list-panes -a -F '#{pane_id}@@AWF@@#{session_name}@@AWF@@#{window_name}@@AWF@@#{pane_current_command}@@AWF@@#{pane_title}@@AWF@@#{window_active}@@AWF@@#{pane_pid}@@AWF@@#{@agentwatch_done}' 2>/dev/null)" || return 1
   fi
   [ -n "$inventory" ] || return 1
   printf '\036AWSOCK\t%s\n' "$sock"
@@ -160,10 +160,11 @@ emit_panes() {
     cmd=${rest%%@@AWF@@*};    rest=${rest#*@@AWF@@}
     title=${rest%%@@AWF@@*};  rest=${rest#*@@AWF@@}
     active=${rest%%@@AWF@@*}; rest=${rest#*@@AWF@@}
-    pid=$rest
+    pid=${rest%%@@AWF@@*};    rest=${rest#*@@AWF@@}
+    done=$rest
     case "$pane" in %*) ;; *) continue ;; esac
     agent="$(agent_under_root "$pid" | head -n 1)"
-    printf '\036AWP\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$sess" "$name" "$cmd" "$title" "$active" "$agent"
+    printf '\036AWP\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane" "$sess" "$name" "$cmd" "$title" "$active" "$agent" "$done"
     if [ "$sock" = default ]; then
       "$TMUX_BIN" capture-pane -p -J -t "$pane" 2>/dev/null ||
         "$TMUX_BIN" capture-pane -p -t "$pane" 2>/dev/null ||
@@ -810,10 +811,11 @@ def parse_remote_records(output, session_filter=None):
             pane, sess, name, command, title = cells[:5]
             active = cells[5] if len(cells) >= 6 else '1'
             proc_agent = cells[6] if len(cells) >= 7 else ''
+            remote_done = cells[7] if len(cells) >= 8 else ''
             screen = rest
             if pane.startswith('%') and (session_filter is None or sess == session_filter):
                 rows.append((pane, sess, name, command, title, screen,
-                             current_socket, active, proc_agent))
+                             current_socket, active, proc_agent, remote_done))
     return rows
 
 
@@ -938,7 +940,10 @@ def remote_states(records, memory=None, target_key=None):
     counts = {'ready': 0, 'work': 0, 'wait': 0}
     details = []
     seen = set()
-    for pane, sess, name, command, title, screen, socket_id, active, proc_agent in records:
+    target_done = False  # any upper-tier window still carrying an unseen ✅ done
+    for pane, sess, name, command, title, screen, socket_id, active, proc_agent, remote_done in records:
+        if remote_done == 'on':
+            target_done = True
         key = (target_key, socket_id, pane)
         seen.add(key)
         hint_command = command + ((' agentproc:' + proc_agent) if proc_agent else '')
@@ -963,7 +968,7 @@ def remote_states(records, memory=None, target_key=None):
         for key in list(memory):
             if key[0] == target_key and key not in seen:
                 del memory[key]
-    return best, counts, details
+    return best, counts, details, target_done
 
 
 def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memory=None,
@@ -980,6 +985,7 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
     links = saved_remote_links()
     pids = pane_process_ids(socket)
     windows = {}
+    window_rdone = {}
     pane_info = []
     targets = {}
 
@@ -1086,6 +1092,7 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
         if show:
             print(f'{pane} {name} ({command}): ssh_targets={len(keys)} '
                   f'direct_ssh={direct} local_nested_tmux={nested_count}')
+        pane_rdone = False  # an upper tier reachable here has an unseen ✅ done
         for key in keys:
             target = targets[key]
             _, data, error, sockets, _ = remote_cache.get(
@@ -1110,9 +1117,13 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
                     elif 'no accessible tmux server sockets' in error:
                         print('    Check the remote tmux user, TMUX_TMPDIR or custom -S socket.')
                 continue
-            (rstate, rreason), counts, details = remote_states(data, remote_memory, key)
+            (rstate, rreason), counts, details, rdone = remote_states(data, remote_memory, key)
             if rstate:
                 found.append((rstate, rreason + (' [stale: last probe failed]' if error else '')))
+            # Carry the upper tier's unseen ✅ up, but only while it's idle there
+            # (an active turn outranks done); the local tab mirrors it.
+            if rdone and rstate == 'ready':
+                pane_rdone = True
             if show:
                 stale = f' (STALE, serving last good; last probe failed: {error})' if error else ''
                 print(f'  remote={target["host"]} sockets={sockets} panes={len(data)} '
@@ -1132,9 +1143,14 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
         state, reason = max(found, key=lambda p: PRIORITY.get(p[0], 0)) if found else ('', 'no state')
         if window not in windows or PRIORITY[state] > PRIORITY[windows[window][0]]:
             windows[window] = (state, reason)
+        window_rdone[window] = window_rdone.get(window, False) or pane_rdone
         if show:
-            print(f'  => {pane}: {state or "unknown"} [{reason}]')
-    return windows
+            print(f'  => {pane}: {state or "unknown"} [{reason}]'
+                  + (' +remote-done' if pane_rdone else ''))
+    # Attach the mirrored-done flag: only meaningful when the tab's own rolled-up
+    # state is idle (ready); a work/wait tab shows its activity, not ✅.
+    return {w: (s, r, window_rdone.get(w, False) and s == 'ready')
+            for w, (s, r) in windows.items()}
 
 
 def remote_interval_for(socket):
@@ -1176,7 +1192,8 @@ def run_watch(socket):
         remote_cache = {}
         remote_memory = {}
         demote_pending = {}
-        done_seen = set()  # windows whose ✅ done you've viewed; retired on leave
+        done_seen = set()    # local ✅ you've viewed; retired when you leave the tab
+        done_remote = set()  # ✅ mirrored from an upper tier; tracks that tier
         hard_failures = 0
         blink_phase = False
         try:
@@ -1212,6 +1229,10 @@ def run_watch(socket):
                 # finish, read authoritatively so an external clear (or a stale
                 # flag from a previous daemon) is reconciled each scan.
                 active_now, done_on = window_flags(socket)
+                # Per window: is this tab's ✅ mirrored from an upper tier (a
+                # remote agent that finished), rather than a turn that ran here?
+                remote_done_map = {w: (v[2] if len(v) >= 3 else False)
+                                   for w, v in windows.items()}
                 for window in set(old) | set(windows):
                     desired = windows.get(window, ('',))[0]
                     current = old.get(window, '')
@@ -1224,10 +1245,8 @@ def run_watch(socket):
                         if cnt >= DEMOTE_CONFIRM:
                             set_state(socket, window, desired)
                             # Finished a task (an active turn → ready): show ✅ done
-                            # whether or not you were watching. If it finished in the
-                            # focused window, ✅ shows there too and is retired when
-                            # you navigate away (the lifecycle below treats a
-                            # currently-focused tab as already viewed).
+                            # whether or not you were watching. (A ✅ that mirrors a
+                            # remote agent is affirmed by the reconciliation below.)
                             if desired == 'ready' and current in ('work', 'wait'):
                                 set_done(socket, window, True)
                                 done_on.add(window)
@@ -1239,11 +1258,35 @@ def run_watch(socket):
                         set_state(socket, window, desired)
                         old[window] = desired
                         demote_pending.pop(window, None)
-                # ✅ done lifecycle: it stays while you haven't looked; once you've
-                # viewed the tab (it became active) it is retired when you navigate
-                # away again, reverting to 🧑‍🔧 ready. New work/wait on the agent
-                # (state no longer ready) retires it at once — you'll see 👨‍💻/✋.
+                # ✅ done lifecycle. Off ready (new work/wait) → clear. A ✅ that
+                # mirrors an UPPER tier (a remote agent) tracks that tier: it stays
+                # ✅ even if you navigate away from this lower tab, until the upper
+                # tier clears its own ✅ (you viewed the agent's window up there) or
+                # the agent takes new work. A LOCAL ✅ uses view-then-leave instead:
+                # retired once you've viewed this tab and left it again.
+                for window in set(old) | done_on | set(windows):
+                    state = old.get(window, '')
+                    if state != 'ready':
+                        if window in done_on:
+                            set_done(socket, window, False)
+                            done_on.discard(window)
+                        done_seen.discard(window)
+                        done_remote.discard(window)
+                    elif remote_done_map.get(window, False):
+                        if window not in done_on:
+                            set_done(socket, window, True)
+                            done_on.add(window)
+                        done_remote.add(window)
+                        done_seen.discard(window)
+                    elif window in done_remote:
+                        # The upper tier cleared its ✅ → clear this mirror too.
+                        if window in done_on:
+                            set_done(socket, window, False)
+                            done_on.discard(window)
+                        done_remote.discard(window)
                 for window in list(done_on):
+                    if window in done_remote:
+                        continue  # mirrored from an upper tier; handled above
                     if old.get(window, '') != 'ready':
                         set_done(socket, window, False)
                         done_on.discard(window)
@@ -1253,6 +1296,7 @@ def run_watch(socket):
                         set_done(socket, window, False)
                         done_on.discard(window)
                 done_seen &= done_on
+                done_remote &= done_on
                 # Flash only what you must act on NOW (✋ wait): toggle the
                 # reverse-video phase every BLINK_PERIOD across the inter-scan gap.
                 # ✅ done is steady and never flashes.
