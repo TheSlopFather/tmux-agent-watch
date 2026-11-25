@@ -10,14 +10,24 @@
 
 | Emoji | State | Meaning |
 |:---:|:---|:---|
-| 👨‍💻 | `work` | Agent is actively working on a turn |
-| ✅ | `done` | Agent just finished a task while you were on another tab |
-| 🧑‍🔧 | `ready` | Agent is idle, waiting for your next prompt |
 | ✋ | `wait` | Agent needs input — a permission/approval or choice prompt |
+| 💥 | `error` | Agent hit an error/crash (no live turn in progress) |
+| ⚠️ | `stale` | Was mid-turn but its screen has been frozen for a while — possibly hung |
+| ⚙️ | `tool` | Actively running a tool / command |
+| 👨‍💻 | `work` | Actively working a turn (generating) |
+| ⏳ | `subagents` | Busy, waiting on background / sub-agents |
+| ✅ | `done` | Just finished a task while you were on another tab |
+| 🧑‍🔧 | `ready` | Idle, waiting for your next prompt |
 
-**✋ `wait` flashes.** Flashing is reserved for the one thing you must act on *now* — an agent waiting on your input — so an unfocused ✋ tab flashes until you switch to it.
+**The busy state is split** so you can tell *what* an agent is doing at a glance: 👨‍💻 generating, ⚙️ running a tool/command, or ⏳ waiting on sub-agents.
+
+**💥 / ⚠️ flag trouble.** 💥 `error` surfaces a crash or failure banner (an agent still actively working is never flagged, even if "error" is on screen). ⚠️ `stale` catches a turn that's gone quiet: a live turn's spinner/timer animates every scan, so a screen frozen for `@agentwatch_stale_after` seconds (default 180; `0` disables) is treated as possibly hung.
+
+**✋ `wait` and 💥 `error` flash.** Flashing is reserved for what you must act on *now* — an agent waiting on your input, or one that errored — so an unfocused ✋/💥 tab flashes until you switch to it. The busy states and ✅ are steady.
 
 **✅ `done` is a steady nudge.** When an agent finishes a turn (👨‍💻 → idle) while you're looking at another tab, that tab shows ✅ instead of 🧑‍🔧, so you can see at a glance which agents finished while you were away. It stays ✅ until you've viewed the tab and navigated away again, then settles to 🧑‍🔧 `ready` — unless you give the agent new work first, in which case it goes straight back to 👨‍💻.
+
+**✅ across tiers.** When the finished agent is up a tier (an SSH tab into a remote, or a jump box), the ✅ on your local tab *mirrors* the one on the agent's own window up there — it's a "something finished down there, go look" signal, not something you can dismiss with a glance. Tabbing past the local tab won't clear it; it clears only when the agent's own ✅ clears (you drilled in and viewed its window up there) or the agent gets new work. Needs the watcher updated on both tiers (`taw push` each).
 
 Supported agents: **Claude Code**, **Hermes**, **Codex**, **Gemini CLI**, **opencode**, **aider**.
 
@@ -51,7 +61,7 @@ flowchart TD
 ```
 
 State rolls **down** each hop — every tab inherits the most-urgent agent above it:
-✋ wait &nbsp;>&nbsp; 👨‍💻 work &nbsp;>&nbsp; ✅ done &nbsp;>&nbsp; 🧑‍🔧 ready
+✋ wait &nbsp;>&nbsp; 💥 error &nbsp;>&nbsp; ⚠️ stale &nbsp;>&nbsp; ⚙️ tool &nbsp;>&nbsp; 👨‍💻 work &nbsp;>&nbsp; ⏳ subagents &nbsp;>&nbsp; ✅ done &nbsp;>&nbsp; 🧑‍🔧 ready
 
 ## How it works
 
@@ -79,7 +89,7 @@ Want a known-good starting point? [`examples/tmux.conf.local`](examples/tmux.con
 
 ### Most-urgent roll-up
 
-A tab that contains several agents (multiple panes, or an SSH session into a remote with many agent windows) shows the **most urgent** state beneath it: **✋ `wait` > 👨‍💻 `work` > ✅ `done` > 🧑‍🔧 `ready`**. So a box where one agent needs you and three are busy shows ✋ — you never miss the one that's waiting, an active 👨‍💻 agent is never hidden by an idle sibling, and a freshly-finished ✅ shows only once nothing beneath it is still working or waiting.
+A tab that contains several agents (multiple panes, or an SSH session into a remote with many agent windows) shows the **most urgent** state beneath it: **✋ `wait` > 💥 `error` > ⚠️ `stale` > ⚙️ `tool` > 👨‍💻 `work` > ⏳ `subagents` > ✅ `done` > 🧑‍🔧 `ready`**. So a box where one agent needs you and three are busy shows ✋ — you never miss the one that's waiting; a crashed or hung agent surfaces over its busy siblings; an active agent is never hidden by an idle one; and a freshly-finished ✅ shows only once nothing beneath it is still working or waiting.
 
 ### Deep nesting (jump boxes)
 
