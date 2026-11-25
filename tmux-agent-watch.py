@@ -35,25 +35,31 @@ CLAUDE_SETTINGS = HOME / '.claude/settings.json'
 CLAUDE_HOOK_MARKER = '.local/bin/tmux-agent-watch" event '
 MARK_START = '# >>> tmux-agent-watch base-only >>>'
 MARK_END = '# <<< tmux-agent-watch base-only <<<' 
-# Tab emoji, in display-priority order: ✋ wait, 👨‍💻 work, ✅ done, 🧑‍🔧 ready.
-# ✅ "done" is an overlay carried by @agentwatch_done (set when the agent finished
-# a turn while you were on another tab) on top of the underlying ready state, so
-# the visible roll-down is wait > work > done > ready. It shows a steady ✅ until
-# you've viewed the tab and navigated away again (then it reverts to 🧑‍🔧 ready).
+# Tab emoji, checked in display-priority order: ✋ wait, 💥 error, ⚠️ stale,
+# ⚙️ tool, 👨‍💻 work (generating), ⏳ subagents, ✅ done, 🧑‍🔧 ready. ✅ "done" is an
+# overlay carried by @agentwatch_done (set when the agent finished a turn) on top
+# of the ready state; it shows a steady ✅ until you've viewed the tab and
+# navigated away again (then it reverts to 🧑‍🔧 ready).
 WINDOW_FLAG = ('#{?#{==:#{@agentwatch_state},wait}, ✋,'
+               '#{?#{==:#{@agentwatch_state},error}, 💥,'
+               '#{?#{==:#{@agentwatch_state},stale}, ⚠️,'
+               '#{?#{==:#{@agentwatch_state},tool}, ⚙️,'
                '#{?#{==:#{@agentwatch_state},work}, 👨‍💻,'
+               '#{?#{==:#{@agentwatch_state},subagents}, ⏳,'
                '#{?#{==:#{@agentwatch_done},on}, ✅,'
-               '#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}}')
+               '#{?#{==:#{@agentwatch_state},ready}, 🧑‍🔧,}}}}}}}}')
 # Flashing is reserved for information you must act on NOW: an agent waiting on
-# you (state==wait). ✅ done is informational, so it does NOT flash. Rather than
-# the SGR blink attribute — which terminals drive off their own timer (urxvt
-# resets it on every keypress/mouse move, so the flash stops exactly when you're
-# busy elsewhere, and kitty ignores it entirely) — the watcher drives the flash
-# itself: it toggles the global @agentwatch_blink option a few times a second
-# while any such window exists and forces a status redraw. The format inverts the
-# tab (reverse video) on the "on" phase, giving a reliable flash on any terminal.
-# Applied only to the non-current window format, so focusing the window stops it.
-FLASH_WHEN = '#{==:#{@agentwatch_state},wait}'
+# you (state==wait) or one that errored/crashed (state==error). The busy and ✅
+# done states are informational, so they do NOT flash. Rather than the SGR blink
+# attribute — which terminals drive off their own timer (urxvt resets it on every
+# keypress/mouse move, so the flash stops exactly when you're busy elsewhere, and
+# kitty ignores it entirely) — the watcher drives the flash itself: it toggles the
+# global @agentwatch_blink option a few times a second while any such window exists
+# and forces a status redraw. The format inverts the tab (reverse video) on the
+# "on" phase, a reliable flash on any terminal. Applied only to the non-current
+# window format, so focusing the window stops it.
+FLASH_WHEN = ('#{||:#{==:#{@agentwatch_state},wait},'
+              '#{==:#{@agentwatch_state},error}}')
 FLASH_ON = '#{?#{&&:' + FLASH_WHEN + ',#{==:#{@agentwatch_blink},on}},#[reverse],}'
 FLASH_OFF = '#{?' + FLASH_WHEN + ',#[noreverse],}'
 BLINK_PERIOD = 0.5
@@ -85,13 +91,14 @@ LEGACY_AGENTWATCH_KEY = HOME / '.ssh' / 'agentwatch'
 
 # Urgency ranking used everywhere classified states are combined (per-pane,
 # per-window, and when rolling up nested/remote tmux tiers). A tab inherits the
-# MOST urgent state of any agent beneath it: wait (needs a human) > work (active,
-# something is happening) > ready (idle) > none. Active work outranks an idle
-# sibling, so a working agent is never hidden by a ready one on the same host.
-# The ✅ "done" state is NOT classified from a screen — it is a per-window overlay
-# latched onto a window whose rolled-up state just fell from work to ready while
-# unfocused, so the full VISIBLE order is wait > work > done > ready.
-PRIORITY = {'': 0, 'ready': 1, 'work': 2, 'wait': 3}
+# MOST urgent state of any agent beneath it. The active turn is split into finer
+# states; "stale" (an active turn whose screen has frozen) and "error" are the
+# attention-worthy escalations; "done" is a per-window overlay on ready (latched
+# when a window fell from an active state to ready). Full VISIBLE roll-down:
+#   ✋ wait > 💥 error > ⚠️ stale > ⚙️ tool > 👨‍💻 work > ⏳ subagents > ✅ done > 🧑‍🔧 ready
+#   (needs you)        (something wrong)      (busy: generating / tool / sub-agents)   (idle)
+PRIORITY = {'': 0, 'ready': 1, 'subagents': 2, 'work': 3, 'tool': 4,
+            'stale': 5, 'error': 6, 'wait': 7}
 
 # Read-only remote inventory. The login tmux server is not necessarily the
 # default socket: users commonly run tmux -L or -S. Search own UID's tmux
@@ -277,6 +284,31 @@ CLAUDE_WORKING = re.compile(
     r'|\(\s*\d+(?:\.\d+)?s\s*·'
     r')')
 
+# Finer flavours of an active turn (👨‍💻 work splits into ⚙️ tool / ⏳ subagents).
+# SUBAGENTS is reliable (Claude's "✻ Waiting for 2 background agents to finish").
+# TOOL is best-effort — a visible tool/command-execution marker; when nothing
+# matches, an active turn stays plain 👨‍💻 "work" (generating).
+SUBAGENTS = re.compile(r'(?i)\bwaiting for \d+ (?:background |sub[- ]?)?'
+                       r'(?:agent|task|job)s?\b')
+TOOL = re.compile(r'(?im)^\s*⎿\s*(?:running|executing)\b'
+                  r'|\brunning (?:tool|command|shell|bash|tests?|the command)\b'
+                  r'|\bexecuting (?:a )?(?:command|tool|shell)\b'
+                  r'|\brunning…|\btool call\b|\binvoking (?:tool|command)\b')
+# 💥 error/crash banner. Conservative and footer-anchored to avoid flagging an
+# agent that merely *mentions* an error in its output; paired in classify() with
+# "no live interrupt affordance", so a turn actively working is never an error.
+ERROR = re.compile(r'(?im)^\s*(?:⎿\s*|[●•]\s*|✗\s*|✘\s*)?'
+                   r'(?:api error|request (?:failed|timed out)|overloaded|'
+                   r'rate.?limit(?:ed)?|connection (?:error|reset|refused|closed)|'
+                   r'fatal(?: error)?:|thread .*panicked|segmentation fault|'
+                   r'traceback \(most recent call last\)|'
+                   r'(?:unhandled|uncaught) (?:exception|error))\b')
+# A turn whose captured screen has not changed for this long is treated as ⚠️
+# stale (possibly hung): a live turn's spinner/timer animates every scan, so a
+# frozen screen means nothing is actually progressing. Tunable per tier with
+# `tmux set -g @agentwatch_stale_after <seconds>`; 0 disables staleness.
+STALE_AFTER = 180.0
+
 
 def tmux_args(socket=None):
     return ['tmux'] + (['-S', socket] if socket else [])
@@ -429,8 +461,17 @@ def classify(screen, name='', command=''):
     hermes_status = '\n'.join(l for l in lines[-6:]
                               if not COMPOSER.match(l)
                               and not HERMES_COMPOSER.match(l))
+    # The flavour of an active turn: ⏳ waiting on sub-agents, ⚙️ running a tool,
+    # else plain 👨‍💻 generating. Applied wherever a turn is detected below.
+    wsub = ('subagents' if SUBAGENTS.search(focus)
+            else 'tool' if TOOL.search(focus) else 'work')
+    # 💥 error: a crash/failure banner with NO live interrupt affordance (a turn
+    # actively working, interruptible, is never an error even if "error" is on
+    # screen). Checked before the work branches so it outranks them.
+    if agent and ERROR.search(recent) and not INTERRUPT.search(recent):
+        return 'error', 'error/crash banner'
     if agent and INTERRUPT.search(recent):
-        return 'work', 'visible interrupt affordance'
+        return wsub, 'visible interrupt affordance'
     # Claude Code's working footer (spinner + verb… + live timer) stays on
     # screen alongside the composer; detect it before the composer→ready branch.
     # Skip it for Hermes: Hermes has its own dialect matchers below and prints
@@ -438,18 +479,18 @@ def classify(screen, name='', command=''):
     # "✦ Tip: …" welcome line — which the loose spinner branch would misread as
     # a live turn, flagging an idle Hermes as working.
     if agent and not hermes and CLAUDE_WORKING.search(focus):
-        return 'work', 'working spinner/timer footer'
+        return wsub, 'working spinner/timer footer'
     if hermes and HERMES_WORKING.search(hermes_status):
-        return 'work', 'Hermes TUI activity bar'
+        return wsub, 'Hermes TUI activity bar'
     # Fallback for spinner frames outside the known set: a gerund + ellipsis
     # followed by the bar's middot/pipe separator or end of line (not prose).
     if hermes and re.search(r'(?im)\b(?:thinking|working|running|generating|'
                             r'reflecting|planning|pondering|contemplating|searching|'
                             r'reading|writing|compiling|building)\b\s*(?:…|\.{2,})'
                             r'\s*(?:·|\||$)', hermes_status):
-        return 'work', 'Hermes TUI busy status'
+        return wsub, 'Hermes TUI busy status'
     if hermes and re.search(r'(?i)\b(?:pondering|contemplating)\b.{0,26}\(\d+(?:\.\d+)?s\)', hermes_status):
-        return 'work', 'Hermes classic thinking animation'
+        return wsub, 'Hermes classic thinking animation'
     # Idle/ready: an explicit "ready" in the bar (possibly prefixed by
     # box-drawing/spinner/sigil glyphs) or the original bare form.
     if hermes and (re.search(r'(?im)^\W*ready\b', hermes_status)
@@ -458,7 +499,7 @@ def classify(screen, name='', command=''):
     if composer and (agent or any('shift+tab to cycle' in l.lower() for l in tail_lines)):
         return 'ready', 'visible agent input composer'
     if agent and BUSY.search(recent):
-        return 'work', 'visible agent busy indicator'
+        return wsub, 'visible agent busy indicator'
     return '', 'no current agent state detected'
 
 
@@ -937,7 +978,7 @@ def remote_states(records, memory=None, target_key=None):
     Whenever fresh UI cues appear, they override the remembered state.
     """
     best = ('', 'no recognizable agent state in remote windows')
-    counts = {'ready': 0, 'work': 0, 'wait': 0}
+    counts = {}
     details = []
     seen = set()
     target_done = False  # any upper-tier window still carrying an unseen ✅ done
@@ -958,7 +999,7 @@ def remote_states(records, memory=None, target_key=None):
             else:
                 memory.pop(key, None)
         if state:
-            counts[state] += 1
+            counts[state] = counts.get(state, 0) + 1
         if PRIORITY[state] > PRIORITY[best[0]]:
             best = (state, f'remote {sess}:{name} {pane}: {reason}')
         details.append({'pane':pane, 'session':sess, 'name':name,
@@ -972,7 +1013,7 @@ def remote_states(records, memory=None, target_key=None):
 
 
 def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memory=None,
-         remote_interval=None):
+         remote_interval=None, stale_memory=None, stale_after=None):
     panes = list_panes(socket)
     if panes is None:
         return None
@@ -981,11 +1022,13 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
         remote_cache = {}
     if remote_memory is None:
         remote_memory = {}
+    stale_after = STALE_AFTER if stale_after is None else stale_after
     now = time.monotonic()
     links = saved_remote_links()
     pids = pane_process_ids(socket)
     windows = {}
     window_rdone = {}
+    window_content = {}  # per-window agent screens, hashed to detect a frozen turn
     pane_info = []
     targets = {}
 
@@ -1022,6 +1065,7 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
             else:
                 agent_cmd = local_agent_descendant(pids.get(pane))
                 found.append(classify(cap.stdout, name + ' ' + agent_cmd, command))
+                window_content.setdefault(window, []).append(cap.stdout)
 
         keys = []
         direct = 0
@@ -1056,6 +1100,7 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
                         if ncap.returncode == 0:
                             agent_cmd = local_agent_descendant(nested_pids.get(npane))
                             found.append(classify(ncap.stdout, nname + ' ' + agent_cmd, ncmd))
+                            window_content.setdefault(window, []).append(ncap.stdout)
                     for t in discovered_ssh_targets(nested_pids.get(npane)):
                         keys.append(add_target(t))
         pane_info.append((pane, window, name, command, found,
@@ -1120,6 +1165,13 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
             (rstate, rreason), counts, details, rdone = remote_states(data, remote_memory, key)
             if rstate:
                 found.append((rstate, rreason + (' [stale: last probe failed]' if error else '')))
+            # Feed remote screens into this window's freeze check (a live remote
+            # turn animates; a frozen one is what staleness should catch). Skip
+            # when the probe failed and we're serving cached data, so a dropped
+            # poll doesn't look like a frozen agent.
+            if data and not error:
+                window_content.setdefault(window, []).append(
+                    ''.join(rec[5] for rec in data))
             # Carry the upper tier's unseen ✅ up, but only while it's idle there
             # (an active turn outranks done); the local tab mirrors it.
             if rdone and rstate == 'ready':
@@ -1147,10 +1199,27 @@ def scan(socket, show=False, remote_cache=None, force_remote=False, remote_memor
         if show:
             print(f'  => {pane}: {state or "unknown"} [{reason}]'
                   + (' +remote-done' if pane_rdone else ''))
-    # Attach the mirrored-done flag: only meaningful when the tab's own rolled-up
-    # state is idle (ready); a work/wait tab shows its activity, not ✅.
-    return {w: (s, r, window_rdone.get(w, False) and s == 'ready')
-            for w, (s, r) in windows.items()}
+    # Finalize each window: escalate a frozen active turn to ⚠️ stale, and attach
+    # the mirrored-✅ flag (only meaningful when the tab's own state is idle).
+    active = ('work', 'tool', 'subagents')
+    result = {}
+    for w, (s, r) in windows.items():
+        if stale_memory is not None and stale_after and s in active:
+            h = hashlib.blake2s(''.join(window_content.get(w, [])).encode('utf-8', 'replace'),
+                                digest_size=12).digest()
+            prev = stale_memory.get(w)
+            if prev and prev[0] == h:
+                stale_memory[w] = (h, prev[1])
+                if now - prev[1] >= stale_after:
+                    s, r = 'stale', 'active but screen frozen ≥ %gs (possibly hung)' % stale_after
+            else:
+                stale_memory[w] = (h, now)
+        result[w] = (s, r, window_rdone.get(w, False) and s == 'ready')
+    if stale_memory is not None:
+        for w in list(stale_memory):
+            if w not in windows or windows[w][0] not in active:
+                stale_memory.pop(w, None)
+    return result
 
 
 def remote_interval_for(socket):
@@ -1167,6 +1236,20 @@ def remote_interval_for(socket):
     except (ValueError, AttributeError):
         pass
     return REMOTE_INTERVAL
+
+
+def stale_after_for(socket):
+    """Per-tier override of the ⚠️ stale threshold (seconds), live-tunable with:
+        tmux set -g @agentwatch_stale_after <seconds>   (0 disables staleness)
+    Falls back to the STALE_AFTER default when unset or invalid."""
+    out = tmux_call(socket, 'show-option', '-gv', '@agentwatch_stale_after')
+    try:
+        val = float(out.stdout.strip())
+        if val >= 0:
+            return val
+    except (ValueError, AttributeError):
+        pass
+    return STALE_AFTER
 
 
 def run_watch(socket):
@@ -1191,6 +1274,7 @@ def run_watch(socket):
         old = {}
         remote_cache = {}
         remote_memory = {}
+        stale_memory = {}    # window -> (content hash, first-seen time) for ⚠️ stale
         demote_pending = {}
         done_seen = set()    # local ✅ you've viewed; retired when you leave the tab
         done_remote = set()  # ✅ mirrored from an upper tier; tracks that tier
@@ -1201,7 +1285,9 @@ def run_watch(socket):
                 try:
                     windows = scan(socket, remote_cache=remote_cache,
                                    remote_memory=remote_memory,
-                                   remote_interval=remote_interval_for(socket))
+                                   remote_interval=remote_interval_for(socket),
+                                   stale_memory=stale_memory,
+                                   stale_after=stale_after_for(socket))
                 except Exception:
                     # A transient error (tmux hiccup, an SSH teardown mid-probe,
                     # a parse race) must NEVER kill the daemon: dying would run
@@ -1218,13 +1304,15 @@ def run_watch(socket):
                     continue
                 hard_failures = 0
                 # Asymmetric hysteresis against emoji flicker. Calmness level:
-                # an active turn (work/wait) > idle (ready) > nothing. Any step
-                # UP applies at once for responsiveness; any step DOWN must be
-                # confirmed across DEMOTE_CONFIRM scans, so a single transient
-                # read cannot bounce the emoji — neither work→ready during a
-                # brief spinner-less gap mid-turn, nor ready→blank on a momentary
-                # empty/garbled capture.
-                level = {'': 0, 'ready': 1, 'work': 2, 'wait': 2}
+                # any attention/active state > idle (ready) > nothing. Any step UP
+                # applies at once for responsiveness; any step DOWN must be
+                # confirmed across DEMOTE_CONFIRM scans, so a single transient read
+                # can't bounce the emoji (e.g. a brief spinner-less gap mid-turn,
+                # or ready→blank on a momentary empty capture). All active/alert
+                # states share one level, so switching among them (generating ↔
+                # tool ↔ subagents ↔ stale ↔ error ↔ wait) is immediate.
+                level = {'': 0, 'ready': 1, 'subagents': 2, 'work': 2, 'tool': 2,
+                         'stale': 2, 'error': 2, 'wait': 2}
                 # Who you're looking at, and which tabs still carry an unseen
                 # finish, read authoritatively so an external clear (or a stale
                 # flag from a previous daemon) is reconciled each scan.
@@ -1244,10 +1332,11 @@ def run_watch(socket):
                         cnt = cnt + 1 if cand == desired else 1
                         if cnt >= DEMOTE_CONFIRM:
                             set_state(socket, window, desired)
-                            # Finished a task (an active turn → ready): show ✅ done
+                            # Finished a task (any active turn → ready): show ✅ done
                             # whether or not you were watching. (A ✅ that mirrors a
                             # remote agent is affirmed by the reconciliation below.)
-                            if desired == 'ready' and current in ('work', 'wait'):
+                            if desired == 'ready' and current in (
+                                    'work', 'tool', 'subagents', 'wait'):
                                 set_done(socket, window, True)
                                 done_on.add(window)
                             old[window] = desired
@@ -1297,10 +1386,11 @@ def run_watch(socket):
                         done_on.discard(window)
                 done_seen &= done_on
                 done_remote &= done_on
-                # Flash only what you must act on NOW (✋ wait): toggle the
-                # reverse-video phase every BLINK_PERIOD across the inter-scan gap.
-                # ✅ done is steady and never flashes.
-                if any(s == 'wait' for s in old.values()):
+                # Flash only what you must act on NOW: an agent waiting on you
+                # (✋ wait) or one that errored (💥). Toggle the reverse-video phase
+                # every BLINK_PERIOD across the inter-scan gap. The busy states and
+                # ✅ done are steady and never flash.
+                if any(s in ('wait', 'error') for s in old.values()):
                     deadline = time.monotonic() + INTERVAL
                     while live:
                         blink_phase = not blink_phase
@@ -1828,7 +1918,8 @@ def install(uninstall=False):
             restart_watch(sock)
         else:
             print('Watcher will start automatically when you start tmux.')
-        print('Indicators: ✋ input needed (flashes); 👨‍💻 working; ✅ just finished (until you look); 🧑‍🔧 ready/idle.')
+        print('Indicators: ✋ input needed (flashes); 💥 errored (flashes); ⚠️ stale/hung; '
+              '⚙️ running a tool; 👨‍💻 working; ⏳ waiting on sub-agents; ✅ just finished (until you look); 🧑‍🔧 ready/idle.')
         print('Local Claude Code: native hooks installed; restart Claude to load them.' if updated_hooks else 'Local Claude Code: native hook configuration unchanged or unavailable.')
         print('Remote nested tmux: inspects hidden windows, with per-pane agent process identification.')
         print(f'Diagnostics: taw check  ·  Push a remote tier: taw push user@host')
